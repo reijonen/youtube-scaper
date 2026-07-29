@@ -98,3 +98,36 @@ governs this project.
   `src/scraper/storage/schema.sql` verbatim (read, never copied by hand or modified) to a
   fresh `:memory:` database per test run, then inserts minimal rows. This keeps the test
   schema from silently drifting out of sync with the scraper's actual schema.
+
+## Phase 3 — View registry
+
+- **Route strategy: one generic dynamic route, `src/routes/[view]/+page.server.ts` +
+  `+page.svelte`, not one route folder per view.** SPEC.md says the channel graph's route
+  is `/channels`, but PLAN.md's Phase 3 "done when" requires the view to be "discovered and
+  navigable without any file outside its own folder naming it" — a hand-written
+  `src/routes/channels/` folder would itself be a file outside `src/lib/views/channels/`
+  that names the view. Resolved by giving the channel-graph manifest `id: 'channels'` and
+  letting the single generic `[view]` route match on that id — the route matches
+  SPEC.md's literal URL while staying generic: it never changes when a new view folder is
+  added, satisfying the architecture's "no routing changes" promise.
+- `src/lib/views/index.ts` uses `import.meta.glob<{ default: ViewManifest }>('./*/manifest.ts', { eager: true })`
+  to discover views. `eager: true` was chosen over lazy imports because this app has no
+  production build/deploy target (SPEC.md) and no meaningful number of views yet — code-split
+  loading has no payoff here and would only add async-await ceremony to `+layout.svelte`'s
+  nav rendering.
+- **A worry that turned out to be unfounded: SvelteKit's "cannot import `$lib/server` into
+  client code" guard does not fire here**, even though `+layout.svelte` (a client
+  component) imports `$lib/views`, which eagerly imports every `manifest.ts`, which in turn
+  imports `$lib/server/queries/channelGraph.ts`. Verified directly by running `npm run dev`
+  and hitting both `/` and `/channels` — no build/runtime error, and the page renders.
+  This works because `channelGraph.ts` only takes a `better-sqlite3` `Database` as a
+  type-only import (`import type { Database } from 'better-sqlite3'`) and never imports the
+  native module itself at the value level, so nothing server-only actually crosses into the
+  client bundle. Loading real data still only happens in `+page.server.ts`, which passes the
+  already-computed `ChannelGraph` object to the client component — the client never touches
+  `db.ts` or the native module. Worth re-checking if a future view's query module ever needs
+  a runtime (not type-only) import from `better-sqlite3` or `node:*` — that would very
+  likely trip the guard and require moving `load` out of the eagerly-globbed manifest.
+- `ChannelsView.svelte` in Phase 3 is a placeholder (a plain counts summary) — Phase 5/6
+  replace it with the actual Sigma/ranked-list rendering. Its only job here is to prove data
+  flows from `getChannelGraph` through the registry to a rendered component.
