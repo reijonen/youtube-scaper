@@ -36,6 +36,12 @@ DEFAULT_MAX_RECOMMENDATIONS = 100
 DEFAULT_INTER_VIDEO_DELAY_MS = 5000
 DEFAULT_SCROLL_DELAY_MS = 1000
 DEFAULT_DELAY_JITTER = 0.25
+# Off by default: nothing about the collector's normal stopping conditions
+# is comment-aware, so turning this on trades a stricter completion
+# guarantee (comments header resolved, not just recommendations) for
+# scrolling further past whatever the recommendation-side conditions would
+# have stopped at on their own.
+DEFAULT_WAIT_FOR_COMMENTS = False
 
 # Controller-side input caps (SPEC-V3, Input hardening: "The controller
 # enforces bounded caps on payload size, payloads per video, and total bytes
@@ -68,10 +74,17 @@ CHROME_GRACEFUL_TERMINATE_DEADLINE_S = 10.0
 # page-ready timeout, and acknowledgement timeout") but, again, doesn't pin
 # numbers for. These are sent to the extension as hello_ack.config — see
 # extension/src/protocol.ts, CollectionConfig, which mirrors this shape
-# field-for-field. Not yet consumed by VideoSession itself (Phase 7 wires
-# a controller-built config dict into hello_ack); listed here so Phase 7
-# only has to assemble the dict, not invent the values.
+# field-for-field.
 PAGE_READY_TIMEOUT_MS = 15_000
 ACK_TIMEOUT_MS = 10_000
-MAX_SCROLL_ROUNDS = 200
+# Default is deliberately conservative, not a throughput-optimised number:
+# a real live run against an atypical video (no usable ytInitialData, or
+# repeated reloads before it settles) scrolled unbounded toward the old
+# default of 200 with nothing to show for it, and had to be killed by hand.
+# CLI-configurable via --max-scroll-rounds (per SPEC-V3's own "Completion
+# condition" requirement that this be configurable) so a caller can opt
+# into a higher ceiling for videos they trust will paginate normally,
+# rather than that being the default everyone gets. See DECISIONS.md,
+# Phase 7.
+MAX_SCROLL_ROUNDS = 20
 MAX_PAGE_DURATION_MS = 20 * 60 * 1000

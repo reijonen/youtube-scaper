@@ -86,6 +86,14 @@ export interface CollectionConfig {
   ackTimeoutMs: number;
   maxScrollRounds: number;
   maxPageDurationMs: number;
+  // When true, neither chain-exhaustion nor the recommendation cap ends
+  // collection until the comments header's count is resolved (known to be
+  // 0, or at least one thread has actually been captured) — otherwise a
+  // low --max-recommendations (or a short recommendation chain) can end
+  // the page before comments ever get a chance to load, since nothing
+  // about the collector's own stopping conditions is comment-aware.
+  // maxScrollRounds/maxPageDurationMs still bound this either way.
+  waitForComments: boolean;
 }
 
 export interface HelloAckMessage {

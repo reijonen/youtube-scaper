@@ -282,3 +282,213 @@ expected ID, connects through the bridge, completes a handshake) was then
 verified against that real template using a real `ChromeSession` and a real
 `ControllerServer`, not a fake one.
 → Manual run, not committed to the repo.
+
+## Phase 7 — Integration
+
+Phase 7's own scope (wiring `python -m scraper controller` to the pieces every
+earlier phase built) was small. Most of this phase turned out to be real bugs
+in the extension that only manifest against live Chrome and live YouTube
+traffic — timing, service-worker restarts, real redirects — none of which the
+unit test suite (which mocks the extension boundary entirely) could have
+caught. Each is real, not speculative: found via an actual run, fixed, then
+re-verified live.
+
+**Real bugs found and fixed, in the order they surfaced:**
+
+1. **`onCommitted`'s navigation guard was a one-shot token.** It failed the
+   video the instant YouTube's own same-video redirect (`?v=X` →
+   `?v=X&themeRefresh=1`) committed a second time, since the token was
+   consumed by the first commit. Fixed to compare the committed URL's `v`
+   query param against the assigned video ID instead of requiring an exact
+   URL match — tolerates YouTube's own redirects on the same video, still
+   catches a real navigate-away.
+   → `extension/src/service-worker.ts`, `chrome.webNavigation.onCommitted`.
+
+2. **`ensureWorkerTab()` always created a new blank tab** instead of reusing
+   the tab Chrome already has open at launch, leaving two tabs open where
+   SPEC-V3 says one. Fixed to adopt the existing tab via `chrome.tabs.query`.
+   → `extension/src/service-worker.ts`, `ensureWorkerTab`.
+
+3. **The service worker re-navigated the tab on every `hello_ack`**,
+   including the ones following its own ~30s MV3 idle-timeout restarts —
+   restarting page load in a loop that, in the worst observed case, never
+   let a real watch page finish loading at all. Fixed to only navigate when
+   the assigned video ID differs from what's already assigned; a restart's
+   `hello_ack` re-announces state without re-navigating, matching SPEC-V3's
+   "re-announces its state... before doing anything else."
+   → `extension/src/service-worker.ts`, `handleControllerMessage`'s
+     `hello_ack` case.
+
+4. **A real race in `chrome.runtime.onConnect`**: the handler validated the
+   sender tab with `await loadState()` *before* registering
+   `port.onMessage.addListener`. The collector's `assign_request`, sent
+   synchronously right after connecting, could arrive before the listener
+   existed and was silently dropped — Chrome doesn't queue Port messages for
+   a not-yet-registered listener. Observed live as "collector connected"
+   with no assignment ever following. Fixed by registering the listener
+   synchronously in the same tick as `onConnect` firing, buffering messages
+   until validation completes.
+   → `extension/src/service-worker.ts`, `chrome.runtime.onConnect`.
+
+5. **Scroll-stall detection treated any captured payload as progress**,
+   including duplicate `ytInitialPlayerResponse` re-captures unrelated to
+   pagination (YouTube can refire that property independently of
+   scrolling). The stall counter kept resetting and the loop scrolled
+   continuously up to the `maxScrollRounds` ceiling — observed live as
+   runaway scrolling the user had to force-kill Chrome to stop. Fixed to
+   only count payloads recognised as sidebar-shaped
+   (`hasFurtherContinuation() !== null`) toward progress.
+   → `extension/src/collector.ts`, `recognisedPayloadCount`.
+
+6. **The consent-redirect host check was too strict.** The golden template's
+   cookie-consent extension ("I still don't care about cookies" — see
+   `gates/README.md`, Gate A) can route through a genuine top-level redirect
+   to `consent.google.com` (never `*.youtube.com`) before landing back on
+   the video — the normal case here, since `data-dir` starts cookie-less
+   every video. `isAllowedYouTubeUrl`'s host check would have failed the
+   video immediately on that redirect, and even a same-host YouTube
+   interstitial with no `v=` param would have tripped it too. Both are now
+   tolerated as transitional; a real host mismatch or a different video's
+   `v=` param still fails the run.
+   → `extension/src/service-worker.ts`, `isTransitionalConsentUrl`,
+     `chrome.webNavigation.onCommitted`.
+
+7. **`PAGE_READY_TIMEOUT` was gated on the wrong signal.** `sawInitialPayload`
+   was satisfied by capturing *either* `ytInitialPlayerResponse` or
+   `ytInitialData` — since the player response reliably arrives first and
+   fast regardless of whether the sidebar ever loads, a missing
+   `ytInitialData` sailed past the 15s deadline undetected and the collector
+   scrolled blind. Split into a signal specific to `ytInitialData`, so a
+   genuinely missing sidebar now fails fast and clearly instead of silently
+   scrolling for a long time with nothing to show for it.
+   → `extension/src/collector.ts`, `sawInitialData`.
+
+8. **A double `start()` invocation raced two native connections against each
+   other.** `start()` was reachable from three places for the same module
+   evaluation — an unconditional top-level call (needed because MV3 idle-
+   timeout restarts fire neither Chrome event) plus `onInstalled` and
+   `onStartup`, and the latter fires for real on every genuine Chrome
+   launch, i.e. every video. `NativePort.connect()` had no reentrancy guard
+   of its own: a second call silently overwrote the port reference without
+   disconnecting the first, leaving two live bridge connections and two
+   `hello_ack`-triggered `navigateToVideo()` calls racing each other. This
+   is the actual explanation for the erratic extra-reload behaviour
+   observed live — confirmed by re-running the same three videos
+   back-to-back afterward with zero repeated reloads, in about 9 seconds
+   total. Fixed with a `started` guard.
+   → `extension/src/service-worker.ts`, `start`.
+
+9. **Scrolling had no relationship to acknowledgement.** `driveScrolling`
+   scrolled on a flat timer regardless of whether the last captured batch
+   had actually been durably accepted by the controller — flagged directly
+   by the user ("there's no need to scroll before the data gets accepted").
+   Fixed to wait until nothing is queued or in-flight before the next
+   scroll, bounded by `ackTimeoutMs` (SPEC-V3's "acknowledgement timeout"
+   circuit breaker, previously wired into the config but never actually
+   enforced anywhere).
+   → `extension/src/collector.ts`, `waitForPendingWorkToSettle`.
+
+10. **No video plays" wasn't actually true.** `--autoplay-policy=document-
+    user-activation-required` blocks *unmuted* autoplay, but Chromium
+    exempts muted media from that policy regardless of the flag's value —
+    and `--mute-audio` is also set, so the video could still visually
+    autoplay, just silently. Observed directly by the user watching a real
+    run. Enforced defensively in the collector instead of relying on the
+    launch flag: pause any `<video>` the instant it exists (a
+    `MutationObserver`) and again the instant anything tries to play it (a
+    capturing `play` listener on `document`, since the event doesn't
+    bubble). Verified live via CDP: `video.paused === true`,
+    `currentTime === 0`, sampled every 1.5s across a 9-second window.
+    → `extension/src/collector.ts`, `suppressAutoplay`.
+
+**Extension logging didn't exist.** SPEC-V3's Logging section requires
+"Extension logs carry the run ID and the current video ID," but there wasn't
+a single `console.log` anywhere in `extension/src/` — bugs 3 and 4 above were
+very hard to diagnose until logging was added first.
+→ `extension/src/service-worker.ts`, `log`; `collector.ts`'s own
+  `console.log` calls at assignment/done/failed.
+
+**`--wait-for-comments`, a new CLI flag, added at the user's suggestion.**
+Nothing about the collector's stopping conditions (recommendation cap,
+chain exhaustion) is comment-aware — a low `--max-recommendations` can end
+collection before the page ever gets a chance to load comments, which is
+exactly what happened in testing and produced a `SCHEMA_UNRECOGNISED`
+failure (correctly: `resolve_comment_state` treats an unresolved header
+count with zero threads as genuinely ambiguous, per its own SPEC-derived
+docstring — this was never a bug in that function). The premise the user
+raised — that YouTube's own comments header carries a real count, just not
+always in the first payload — is correct (`comments.py`'s own docstring
+already said as much). Off by default (`DEFAULT_WAIT_FOR_COMMENTS = False`):
+turning it on trades a stricter completion guarantee for scrolling further
+than the recommendation side alone would have stopped at. When on, neither
+chain-exhaustion nor the recommendation-cap `stop` completes the video until
+the comments header resolves to a real count (zero, or at least one thread
+actually collected) — still bounded by `maxScrollRounds`/
+`maxPageDurationMs` like everything else. Verified live: a real run with
+`--wait-for-comments` produced `status=completed`,
+`comment_state=collected`, `reported_comment_count=2445858`, 20 comments
+actually stored.
+→ `extension/src/collector.ts`, `commentsResolved` / `pendingCompletionReason`.
+→ `extension/src/protocol.ts`, `CollectionConfig.waitForComments`.
+→ `src/scraper/__main__.py`, `--wait-for-comments`.
+
+**`MAX_SCROLL_ROUNDS` default dropped 200 → 20, plus a new
+`--max-scroll-rounds` flag.** The old default let a video stuck on repeated
+reloads (bug 8, before it was found) scroll for a very long time before its
+own circuit breaker gave up — a human had to kill Chrome by hand. SPEC-V3
+already requires "maximum scroll rounds" to be configurable (Completion
+condition); this makes it actually so, conservative by default, with going
+faster/higher an explicit opt-in rather than what everyone gets.
+→ `src/scraper/config.py`, `MAX_SCROLL_ROUNDS`.
+→ `src/scraper/__main__.py`, `--max-scroll-rounds`.
+
+**The controller-side per-video backstop deadline dropped from ~30 minutes
+to 5.** It was originally sized as a multiple of the extension's own
+`MAX_PAGE_DURATION_MS` breaker, on the theory that it only needs to catch
+that breaker failing to fire. That theory was wrong: a live run hit a
+different failure mode entirely — the bridge kept reconnecting every ~30s
+forever, each connection going silent with no `hello`, `video_done`, or
+`video_failed` ever following the first one. `MAX_PAGE_DURATION_MS` never
+applies to that case since the extension-side collection loop never gets
+going, so tying the backstop to it left the controller waiting up to 30
+minutes on a video that was clearly stuck within under a minute.
+→ `src/scraper/controller/runner.py`, `_VIDEO_DEADLINE_S`.
+
+**Multi-video profile reset verified empirically, not just by reading the
+code**, at the user's request. Polled Chrome's PID and `data-dir`'s inode
+every 200ms across a real two-video run: video 1 ran as PID 57720 against
+inode 38616217, then a gap where neither Chrome nor `data-dir` existed at
+all, then video 2 ran as PID 57962 against inode 38618758 — a different
+process against a genuinely different directory (macOS assigns a new inode
+when a directory is deleted and recreated), not the same Chrome instance
+navigating within one profile. Confirmed via code reading too: `copy_profile`
+only ever reads from `template` and writes to `data_dir`; the golden
+template is never mutated by any reset.
+→ `src/scraper/chrome/reset.py`, `copy_profile`.
+
+**Acceptance criteria walk.** All 21 from SPEC-V3, each mapped to either an
+automated test or a live-run observation made during this phase:
+
+| # | Criterion | Evidence |
+|---|---|---|
+| 1 | No `--video-ids` → error, exit non-zero, no profile touched | `test_runner.py::test_empty_video_ids_errors_without_touching_anything` |
+| 2 | In-use `data-dir`/`data-dir-template` blocks; unrelated Chrome doesn't | `test_singleton_lock.py` (7 tests covering live/dead PID, in-use detection) |
+| 3 | Reset replaces `data-dir`, strips `Singleton*`, writes native-host manifest | `test_reset.py::test_reset_profile_full_sequence` |
+| 4 | Chrome from the exact configured path; runtime profile has both extensions | `test_process.py::test_launch_builds_expected_argv`; both extensions' presence confirmed via `Secure Preferences` inspection of the real template |
+| 5 | Handshake within deadline; timeout aborts the run with a clear error | `test_session.py::test_handshake_timeout_raises_and_still_tears_down`; `test_runner.py::test_handshake_timeout_aborts_run`; live-verified (real handshake completing in ~1-2s) |
+| 6 | One tab, top-level nav to each watch page | Bug 2 above, fixed and live-verified (single tab adopted, no second tab) |
+| 7 | Initial payload captured even when assigned before the collector is ready | `capture.ts`'s buffer/flush design (buffers until `collector-ready`); live-verified (`ytInitialPlayerResponse`/`ytInitialData` always arrived) |
+| 8 | Wrapping fetch/XHR doesn't alter page behaviour | Code inspection: `capture.ts` always calls the original and only reads from a `.clone()`, never consumes the real response/body; live runs showed normal page rendering and pagination |
+| 9 | No outbound request to YouTube's internal API from the extension | Code inspection: `capture.ts` only wraps/observes `fetch`/XHR, never calls them itself for `/youtubei/*` |
+| 10 | No video plays; a short video doesn't navigate the worker tab away | Bug 10 above, fixed and live-verified via CDP (`video.paused === true` throughout) |
+| 11 | Stops at cap or chain exhaustion; recorded as such, not a failure | `test_happy_path.py`, `test_cap_stop.py`; live-verified (`completed`, `max_recommendations_reached`) |
+| 12 | Only video entries stored, with both raw and normalised sidebar position | `test_recommendations.py::test_plain_video_accumulator_dedupes_to_80` (checks `normalised_position` sequence); `recommendations.py`'s `RecommendationAccumulator` |
+| 13 | SQLite writes idempotent under batch replay | `test_batches.py::test_replaying_same_batch_id_is_a_noop`, `test_replaying_recommendation_across_different_batches_does_not_duplicate` |
+| 14 | Completion acknowledged before the run advances | By construction: `handle_video_done` commits then acks in one handler call; the runner only advances once `is_done`, which is set after commit. `test_happy_path.py` |
+| 15 | `data-dir` removed after each video/clean shutdown; template unchanged | Empirical PID/inode verification above; `copy_profile` never writes to `template` |
+| 16 | Killing the controller mid-batch loses no acked data, no stuck running state | No `running` status exists in the schema (only `completed`/`failed`) — nothing can be "stuck." `record_batch` commits atomically before acking. Directly observed across several forced kills this session: no orphaned or inconsistent rows |
+| 17 | Killing the service worker mid-video is recovered from, not reported as completion | `test_generations.py`; live-observed repeated SW restarts (`hello` with `restart`) mid-run with no premature completion |
+| 18 | No recognised recommendation payload → structured failure, not completion | `driveScrolling`'s post-loop check (`SCHEMA_UNRECOGNISED` when `!recognisedAnything`); same mechanism observed live for the analogous comments case |
+| 19 | Failed video: reason recorded, no orphaned rows, retried not skipped | `test_video_status.py::test_failed_video_leaves_reason_raw_files_and_zero_child_rows`, `test_failed_video_is_not_skipped_and_is_retried`; live-verified across repeated runs |
+| 20 | Re-running a completed ID skips it, prints which | `test_runner.py::test_rerun_skips_completed_video`; live-verified (`skipping already-completed video IDs: ...` actually printed in a real run) |
+| 21 | Payload interpretation tested against saved fixtures | `tests/parser/*.py`, all parametrised over `gates/captures/*.json` |

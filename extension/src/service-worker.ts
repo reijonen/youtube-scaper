@@ -30,6 +30,15 @@ const HEARTBEAT_PERIOD_MINUTES = 0.4;
 
 let collectorPort: chrome.runtime.Port | null = null;
 
+// SPEC-V3, "Logging": "Extension logs carry the run ID and the current
+// video ID." state is read fresh each call rather than threaded through
+// every call site, since this is a debug aid, not a hot path.
+function log(message: string, ...rest: unknown[]): void {
+  void loadState().then((state) => {
+    console.log(`[yts] run=${state.runId ?? "-"} video=${state.videoId ?? "-"} ${message}`, ...rest);
+  });
+}
+
 function isAllowedYouTubeUrl(value: string): boolean {
   try {
     const url = new URL(value);
@@ -42,10 +51,26 @@ function isAllowedYouTubeUrl(value: string): boolean {
   }
 }
 
+// The cookie-consent extension the golden template is set up with ("I still
+// don't care about cookies" — see gates/README.md, Gate A) dismisses
+// YouTube's consent wall automatically, which routes through a genuine
+// top-level redirect to a consent host before landing back on the video.
+// That host is never youtube.com, so without this it would trip
+// UNEXPECTED_NAVIGATION on every cookie-less profile — which is the normal
+// case here, since data-dir starts from a clean template every video.
+function isTransitionalConsentUrl(url: URL): boolean {
+  return (
+    url.hostname === "consent.youtube.com" ||
+    url.hostname === "consent.google.com" ||
+    url.hostname.endsWith(".consent.google.com")
+  );
+}
+
 // ---------------------------------------------------------------- native port
 
 async function reportFailure(errorCode: ErrorCode, message: string): Promise<void> {
   const state = await loadState();
+  log(`reportFailure ${errorCode}: ${message}`);
   if (!state.runId || !state.videoId) return;
   nativePort.send(
     buildVideoFailed({
@@ -63,6 +88,16 @@ async function handleControllerMessage(msg: ControllerMessage): Promise<void> {
 
   switch (msg.type) {
     case "hello_ack": {
+      // Only navigate for a genuinely new video assignment. A restart's
+      // hello_ack hands back the *same* video (one VideoSession per socket
+      // connection lifetime — SPEC-V3, "One video is collected per browser
+      // session"), and re-navigating on every reconnect would restart page
+      // load in a loop each time the ~30s MV3 idle timeout fires, which is
+      // often before a real watch page has finished loading and captured
+      // anything. SPEC-V3, "Service-worker lifetime": a restart
+      // "re-announces its state to the controller before doing anything
+      // else" — not "re-navigates".
+      const isNewVideo = state.videoId !== msg.videoId;
       const next = await updateState({
         runId: msg.runId,
         videoId: msg.videoId,
@@ -70,7 +105,10 @@ async function handleControllerMessage(msg: ControllerMessage): Promise<void> {
         config: msg.config,
         everConnected: true,
       });
-      await navigateToVideo(next);
+      log(`hello_ack videoUrl=${msg.videoUrl} isNewVideo=${isNewVideo}`);
+      if (isNewVideo) {
+        await navigateToVideo(next);
+      }
       return;
     }
     case "payload_ack":
@@ -138,8 +176,6 @@ async function resendPendingBatch(state: SessionState): Promise<void> {
 
 // ---------------------------------------------------------------- worker tab / navigation
 
-let expectingNavigationToken: string | null = null;
-
 async function ensureWorkerTab(): Promise<number> {
   const state = await loadState();
   if (state.workerTabId !== null) {
@@ -147,13 +183,20 @@ async function ensureWorkerTab(): Promise<number> {
       await chrome.tabs.get(state.workerTabId);
       return state.workerTabId;
     } catch {
-      // Tab no longer exists (closed externally) — fall through and create
-      // a fresh one.
+      // Tab no longer exists (closed externally) — fall through and adopt
+      // or create a fresh one.
     }
   }
-  const tab = await chrome.tabs.create({ active: false, url: "about:blank" });
-  const tabId = tab.id;
-  if (tabId === undefined) throw new Error("chrome.tabs.create returned no tab id");
+
+  // This is a disposable, single-purpose profile — nothing else is ever
+  // open in it — so the tab Chrome opens on launch (its default New Tab
+  // Page) is adopted as the worker tab rather than leaving it idle and
+  // opening a second one. SPEC-V3, acceptance criterion 6: "The extension
+  // uses one tab."
+  const [existing] = await chrome.tabs.query({});
+  const tabId =
+    existing?.id ?? (await chrome.tabs.create({ active: false, url: "about:blank" })).id;
+  if (tabId === undefined) throw new Error("no worker tab id available");
   await updateState({ workerTabId: tabId });
   return tabId;
 }
@@ -167,14 +210,24 @@ async function navigateToVideo(state: SessionState): Promise<void> {
   const tabId = await ensureWorkerTab();
   const nextEpoch = state.navEpoch + 1;
   await updateState({ navEpoch: nextEpoch, pendingBatch: null });
-  expectingNavigationToken = state.videoUrl;
+  log(`navigating tab ${tabId} to ${state.videoUrl} (epoch ${nextEpoch})`);
   await chrome.tabs.update(tabId, { url: state.videoUrl });
 }
 
+// A one-shot "did we initiate this" token turned out to be too strict:
+// YouTube itself issues a same-video top-level redirect right after landing
+// on a watch page (observed live: `?v=<id>` -> `?v=<id>&themeRefresh=1`),
+// which produces a *second* onCommitted event for a navigation the worker
+// never explicitly requested. What actually matters isn't "did we ask for
+// this exact commit" but "did we end up somewhere other than the video we
+// were assigned" — so this compares the committed URL's `v` param against
+// the assigned videoId instead, which tolerates YouTube's own redirects on
+// the same video while still catching a real navigate-away.
 chrome.webNavigation.onCommitted.addListener((details) => {
   void (async () => {
     const state = await loadState();
     if (details.frameId !== 0 || details.tabId !== state.workerTabId) return;
+    if (state.videoId === null) return; // nothing assigned yet (e.g. initial about:blank tab)
 
     let committedUrl: URL;
     try {
@@ -189,12 +242,31 @@ chrome.webNavigation.onCommitted.addListener((details) => {
       return;
     }
 
-    const initiated = expectingNavigationToken !== null;
-    expectingNavigationToken = null;
-    if (!initiated || !isAllowedYouTubeUrl(details.url)) {
+    if (isTransitionalConsentUrl(committedUrl)) {
+      log(`transitional consent redirect, waiting for the real page: ${details.url}`);
+      return;
+    }
+
+    if (!isAllowedYouTubeUrl(details.url)) {
+      await reportFailure("UNEXPECTED_NAVIGATION", `left youtube.com: ${details.url}`);
+      return;
+    }
+
+    const committedVideoId = committedUrl.searchParams.get("v");
+    if (committedVideoId === null) {
+      // A youtube.com page with no video in the URL — e.g. an interstitial
+      // partway through the consent flow above. Not necessarily wrong; wait
+      // for the next commit rather than failing immediately. If nothing
+      // sensible ever follows, PAGE_READY_TIMEOUT (collector-side) and the
+      // controller's own backstop deadline still bound how long this waits.
+      log(`transitional navigation with no video id, waiting: ${details.url}`);
+      return;
+    }
+
+    if (committedVideoId !== state.videoId) {
       await reportFailure(
         "UNEXPECTED_NAVIGATION",
-        `top-level navigation the service worker did not initiate: ${details.url}`,
+        `top-level navigation left the assigned video: ${details.url}`,
       );
     }
   })();
@@ -230,6 +302,7 @@ async function handleCollectorMessage(
 
   if (msg.type === "forward_payload") {
     if (!state.runId || !state.videoId) return;
+    log(`forward_payload batch=${msg.batchId} endpoint=${msg.payload.endpoint}`);
     await updateState({
       pendingBatch: { batchId: msg.batchId, navEpoch: msg.navEpoch, payload: msg.payload },
     });
@@ -250,6 +323,7 @@ async function handleCollectorMessage(
 
   if (msg.type === "report_done") {
     if (!state.runId || !state.videoId) return;
+    log(`report_done reason=${msg.reason}`);
     nativePort.send(
       buildVideoDone({
         runId: state.runId,
@@ -269,22 +343,47 @@ async function handleCollectorMessage(
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== PORT_NAME) return;
 
+  // The collector sends its first message (assign_request) synchronously
+  // right after connecting. Validating the sender with `await loadState()`
+  // before registering the message listener left a real gap: a message
+  // that arrived while that await was pending had nothing listening for it
+  // and was silently dropped (observed live — the collector connected but
+  // never received an assignment). The listener is now registered in the
+  // same synchronous tick as onConnect firing, so nothing can be missed;
+  // messages that arrive before validation finishes are queued and
+  // replayed once it completes.
+  const pendingMessages: unknown[] = [];
+  let validated = false;
+  let rejected = false;
+
+  port.onMessage.addListener((raw: unknown) => {
+    if (rejected) return;
+    if (!validated) {
+      pendingMessages.push(raw);
+      return;
+    }
+    void handleCollectorMessage(raw as CollectorToWorkerMessage);
+  });
+  port.onDisconnect.addListener(() => {
+    if (collectorPort === port) collectorPort = null;
+  });
+
   void (async () => {
     const state = await loadState();
     if (port.sender?.tab?.id !== state.workerTabId) {
       // Not the dedicated worker tab — SPEC-V3 requires every collector
       // message to be verified as originating from it.
+      rejected = true;
       port.disconnect();
       return;
     }
 
     collectorPort = port;
-    port.onMessage.addListener((raw: unknown) => {
+    log("collector connected");
+    validated = true;
+    for (const raw of pendingMessages.splice(0)) {
       void handleCollectorMessage(raw as CollectorToWorkerMessage);
-    });
-    port.onDisconnect.addListener(() => {
-      if (collectorPort === port) collectorPort = null;
-    });
+    }
   })();
 });
 
@@ -308,7 +407,24 @@ function ensureHeartbeat(): void {
 
 // ---------------------------------------------------------------- startup
 
+// start() is reached from three places for the same module evaluation: the
+// unconditional call below (needed because idle-timeout restarts fire
+// neither Chrome event), plus onInstalled and onStartup, which both fire
+// for real on a genuine Chrome launch — i.e. every video, since a fresh
+// Chrome process is launched each time. Without this guard, a single
+// module evaluation called start() twice, and NativePort.connect() has no
+// reentrancy guard of its own: the second call silently overwrote `port`
+// without disconnecting the first, leaving two live bridge connections and
+// two hello_ack-triggered navigateToVideo() calls racing each other. That
+// produced exactly the erratic extra-reload behaviour observed live —
+// not YouTube- or network-timing flakiness, a real bug in our own startup
+// path. See DECISIONS.md, Phase 7.
+let started = false;
+
 async function start(): Promise<void> {
+  if (started) return;
+  started = true;
+  log("service worker starting");
   ensureHeartbeat();
   nativePort.connect();
   await announceHello();
