@@ -131,3 +131,37 @@ governs this project.
 - `ChannelsView.svelte` in Phase 3 is a placeholder (a plain counts summary) — Phase 5/6
   replace it with the actual Sigma/ranked-list rendering. Its only job here is to prove data
   flows from `getChannelGraph` through the registry to a rendered component.
+
+## Phase 4 — Avatar cache
+
+- Route: `src/routes/avatars/[channelId]/+server.ts` (`GET /avatars/:channelId`).
+- **Cache encodes content-type in the file extension instead of a sidecar metadata file.**
+  On a miss, the fetched response's `content-type` header picks an extension from a small
+  known map (`image/jpeg` → `.jpg`, etc., defaulting to `.jpg` for anything unrecognized);
+  the bytes are written to `<cacheDir>/<channelId>.<ext>`. On a lookup, the route checks
+  for each known extension in turn and infers the content-type back from whichever one
+  exists. This avoids a second file (or a JSON index) just to remember one MIME string per
+  channel, at the cost of one `existsSync` call per known extension on every cache-hit
+  request (4 extensions today — negligible).
+- `CHANNEL_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/` validates `params.channelId` before it
+  touches any path — an invalid id gets a plain 400, never a filesystem operation.
+  Verified live: `..%2F..%2Fetc%2Fpasswd` (URL-encoded path traversal) is rejected with 400
+  before any `existsSync`/`fetch` call.
+- Failures are never cached, by construction: `writeFileSync` is reached only after
+  `fetch` succeeds *and* `response.ok`. Every other branch (network error, non-OK status,
+  channel not in the db, empty `avatar_sources_json`, no row at all) returns the fallback
+  SVG directly without touching the cache directory, so a transient failure self-heals on
+  the next request instead of needing a manual cache wipe.
+- Fallback is a hand-built `<svg>` (colored circle + first-letter initial), color derived
+  from a simple deterministic string hash of the display label (`handle ?? name ?? channel_id`)
+  so a given channel always gets the same fallback color across requests, without needing
+  to persist anything.
+- Verified live against the real database end-to-end: cold fetch for a real channel_id
+  writes `avatar-cache/<id>.jpg` (2892 bytes, matching a direct `curl` of the source CDN
+  URL) and returns `content-type: image/jpeg`; a second request returns byte-identical
+  content with the cache file's mtime unchanged (no re-fetch); deleting `avatar-cache/`
+  entirely and re-requesting recovers the identical image with no manual steps; an unknown
+  channel_id renders the fallback SVG.
+- The cache directory resolves relative to the route file's own location
+  (`import.meta.url`, four levels up to `web-ui/`), the same pattern as `db.ts` in Phase 1,
+  for the same reason - no assumption about the process's working directory.
