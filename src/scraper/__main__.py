@@ -10,9 +10,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m scraper")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    controller_parser = subparsers.add_parser(
-        "controller", help="Run the collection controller."
-    )
+    controller_parser = subparsers.add_parser("controller", help="Run the collection controller.")
     controller_parser.add_argument(
         "--video-ids", required=True, help="Comma-separated YouTube video IDs."
     )

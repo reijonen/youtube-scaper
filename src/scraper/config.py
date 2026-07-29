@@ -4,9 +4,7 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
-CHROME_EXECUTABLE = Path(
-    "/Users/sor/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-)
+CHROME_EXECUTABLE = Path("/Users/sor/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
 DATA_DIR = PROJECT_ROOT / "data-dir"
 DATA_DIR_TEMPLATE = PROJECT_ROOT / "data-dir-template"
 EXTENSION_DIR = PROJECT_ROOT / "extension"
