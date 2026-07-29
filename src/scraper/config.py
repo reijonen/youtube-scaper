@@ -15,6 +15,23 @@ RAW_PAYLOAD_DIR = PROJECT_ROOT / "data" / "raw"
 NATIVE_HOST_WRAPPER = PROJECT_ROOT / "bin" / "scraper-native-host"
 NATIVE_HOST_MANIFEST_NAME = "com.sor.yts"
 
+# Placeholder until Phase 6 generates the extension's pinned RSA keypair and
+# derives the real ID from its DER public key (SPEC-V3, "Extension
+# identity"). Chrome IDs are always 32 lowercase a-p letters; this satisfies
+# that shape so Phase 5's manifest-writing code and tests exercise the real
+# format without depending on Phase 6 existing yet.
+EXTENSION_ID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+# Chrome flags fixed by SPEC-V3, "Fixed paths". --user-data-dir and
+# --profile-directory are supplied by the launcher, not listed here.
+CHROME_LAUNCH_FLAGS = (
+    "--profile-directory=Default",
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--autoplay-policy=document-user-activation-required",
+    "--mute-audio",
+)
+
 DEFAULT_MAX_RECOMMENDATIONS = 100
 DEFAULT_INTER_VIDEO_DELAY_MS = 5000
 DEFAULT_SCROLL_DELAY_MS = 1000
@@ -38,3 +55,10 @@ MAX_TOTAL_BYTES_PER_VIDEO = 100 * 1024 * 1024
 # socket; the video's in-memory session state survives for a new connection
 # to resume.
 CONNECTION_IDLE_TIMEOUT_S = 30.0
+
+# SPEC-V3 ("Per-video runtime cycle") requires both a startup handshake
+# deadline and a bounded graceful-termination window before escalating to
+# SIGKILL, but pins no numbers for either — same situation as the Phase 3
+# input caps above. Provisional operational tuning.
+CHROME_STARTUP_HANDSHAKE_DEADLINE_S = 30.0
+CHROME_GRACEFUL_TERMINATE_DEADLINE_S = 10.0

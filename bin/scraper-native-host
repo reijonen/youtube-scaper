@@ -1,0 +1,14 @@
+#!/Users/sor/Dev/youtube/research/pipelines/extraction/tools/scraper/.venv/bin/python3
+"""Native-messaging host wrapper. Chrome launches this executable directly
+(its absolute path is what NativeMessagingHosts/com.sor.yts.json points at),
+providing a minimal environment and an unspecified working directory —
+SPEC-V3 requires this to not depend on PATH, cwd, or shell profile, which is
+why the interpreter itself is pinned via the shebang above rather than
+relying on env lookup."""
+
+import sys
+
+from scraper.native_host import main
+
+if __name__ == "__main__":
+    sys.exit(main())

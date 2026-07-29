@@ -118,3 +118,57 @@ terminates the native host process directly (signal) rather than relying on
 stdin EOF as the sole shutdown signal. Left undone rather than adding a
 fragile workaround for a scenario outside PLAN.md's Phase 4 exit criteria.
 → `src/scraper/native_host.py`, `Bridge.run`.
+
+## Phase 5 — Chrome lifecycle
+
+**`EXTENSION_ID` is a 32-character placeholder in `config.py`, not the real
+extension ID.** SPEC-V3's "Extension identity" derives the real ID from the
+SHA-256 of the pinned RSA public key, which Phase 6 generates — it can't
+exist yet. The placeholder matches Chrome's real ID shape (32 lowercase
+`a`-`p` letters) so the manifest-writing code and its tests exercise the
+actual format; Phase 6 only needs to overwrite this one constant, not change
+the interface.
+→ `src/scraper/config.py`, comment above `EXTENSION_ID`.
+
+**The copy-method benchmark (`ditto` vs `cp -Rc`) is cached per template
+path for the process's lifetime, not re-run before every video.** PLAN.md
+asks for a benchmark to pick the faster of the two, but re-timing it before
+each video's reset would mean copying the whole template three times
+(twice to benchmark, once for real) on every single video instead of once
+per controller run.
+→ `src/scraper/chrome/reset.py`, `_pick_copy_command`.
+
+**Startup handshake deadline (30s) and graceful-termination deadline before
+SIGKILL (10s) have no SPEC-V3-mandated values**, the same situation as
+Phase 3's input caps — SPEC-V3 requires both bounds to exist but doesn't pin
+numbers. Provisional operational tuning.
+→ `src/scraper/config.py`, comment above `CHROME_STARTUP_HANDSHAKE_DEADLINE_S`.
+
+**`ChromeSession`'s in-use check only covers `data_dir` and `template` at
+`__enter__` time**, not continuously during the session. SPEC-V3's
+in-use check exists to stop a reset from clobbering a directory a live
+Chrome process still holds; once this session's own Chrome is running and
+holding the lock itself, there's nothing further to guard against until the
+next video's `__enter__`.
+→ `src/scraper/chrome/session.py`, `ChromeSession.__enter__`.
+
+**Signal handling converts SIGINT/SIGTERM into a raised `SystemExit`
+inside `ChromeSession.__enter__`'s caller frame, rather than a
+flag-and-poll loop.** Raising unwinds whatever `with ChromeSession(...):`
+block is active exactly like any other exception would, so `__exit__` runs
+the same teardown (kill Chrome, delete `data-dir`) regardless of whether the
+block ended normally, via an error, or via a signal — satisfying SPEC-V3's
+"interruption follows the same shutdown path as a normal exit" without a
+separate code path to keep in sync.
+→ `src/scraper/chrome/session.py`, `ChromeSession._install_signal_handlers`.
+
+**Phase 5's real-Chrome exit criterion (fresh profile launches, handshake
+deadline fires, `data-dir` is removed) was verified as a manual smoke test
+against `gates/data-dir-template`, not an automated pytest test.** PLAN.md
+itself scopes the automated Phase 5 tests to the reset sequence against a
+fake template with no Chrome at all; launching real Chrome per test run
+would be slow and machine-dependent. The manual run confirmed: Chrome
+launched against a fresh copy, the extension (not yet built) never
+connected, `HandshakeTimeout` fired at the configured deadline, and Chrome
+exited cleanly (code 0) with `data-dir` removed.
+→ Manual run, not committed to the repo.
