@@ -14,12 +14,13 @@ run/
 *.log
 
 # Disposable and golden Chrome profiles (SPEC-V3: never committed, recreated/maintained locally)
-data-dir/
-data-dir-template/
+# Anchored to the project root so these don't also match gates/data-dir-template.
+/data-dir/
+/data-dir-template/
 
-# gates/ is throwaway probe material; only the profile dirs it generated are excluded
+# gates/data-dir is the disposable runtime profile the probe generated; keep
+# gates/data-dir-template committed, it's the fixture the probe was built against
 gates/data-dir/
-gates/data-dir-template/
 
 # Extension build output (Phase 6)
 extension/dist/
