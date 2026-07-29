@@ -512,3 +512,25 @@ the freshly copied `data-dir`) and click the reload icon on the extension, or tr
 `chrome.developerPrivate.reload(extensionId, {...})` over CDP. Do this on the template
 itself if you want the fix to be picked up by every subsequent per-video copy —
 reloading only inside a throwaway `data-dir` copy doesn't change the template.
+
+## Open investigations
+
+Not blocking anything today, but known-unexplained and worth revisiting.
+
+**`duration_text` and `animated_preview_sources_json` are empty on every recommendation.**
+As of 2026-07-29, all 355 stored recommendations have an empty `duration_text` and an
+empty `animated_preview_sources_json` (`[]`), across all four seed videos that produced
+recommendations. Every other recommendation field populates normally — `title` is 355/355
+and `view_count_text` is 338/355 — so this is not a general extraction failure but
+something specific to these two fields.
+
+Both are parsed in Phase 1 (`RawRecommendation.duration_text`,
+`RawRecommendation.animated_preview_sources`), so the fields exist end to end and the
+columns are being written; they are simply always empty. That points at the extraction
+step rather than storage. Two candidates worth checking first: the lockup shapes these
+values are read from may have moved in YouTube's payload, or they may only be present in
+payloads captured under conditions the current run does not produce (for example, hover
+state for animated previews).
+
+No user-facing impact today — nothing consumes either field. Revisit before anything
+depends on duration or preview data.
