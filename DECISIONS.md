@@ -491,4 +491,24 @@ automated test or a live-run observation made during this phase:
 | 18 | No recognised recommendation payload → structured failure, not completion | `driveScrolling`'s post-loop check (`SCHEMA_UNRECOGNISED` when `!recognisedAnything`); same mechanism observed live for the analogous comments case |
 | 19 | Failed video: reason recorded, no orphaned rows, retried not skipped | `test_video_status.py::test_failed_video_leaves_reason_raw_files_and_zero_child_rows`, `test_failed_video_is_not_skipped_and_is_retried`; live-verified across repeated runs |
 | 20 | Re-running a completed ID skips it, prints which | `test_runner.py::test_rerun_skips_completed_video`; live-verified (`skipping already-completed video IDs: ...` actually printed in a real run) |
-| 21 | Payload interpretation tested against saved fixtures | `tests/parser/*.py`, all parametrised over `gates/captures/*.json` |
+| 21 | Payload interpretation tested against saved fixtures | `tests/parser/*.py`, all parametrised over `tests/captures/*.json` |
+
+## Operational notes
+
+Not design decisions, but gotchas discovered the hard way this session that will bite
+again if forgotten.
+
+**`data-dir-template`'s extension can run stale code after a rebuild.** Chrome caches an
+already-registered unpacked extension's service-worker code per profile. Rebuilding
+`extension/` (`npm run build`) updates the files on disk, but a Chrome instance that has
+previously loaded the extension from `data-dir-template` — or a fresh `data-dir` copied
+from it — can keep running the old service-worker code until the extension is explicitly
+reloaded. This showed up as edits appearing to have no effect, or old bugs seeming to
+reappear, purely because the running code was stale, not because the fix was wrong.
+
+Force a reload after every extension rebuild, before trusting a live run against the
+template: open `chrome://extensions` in a window running against `data-dir-template` (or
+the freshly copied `data-dir`) and click the reload icon on the extension, or trigger
+`chrome.developerPrivate.reload(extensionId, {...})` over CDP. Do this on the template
+itself if you want the fix to be picked up by every subsequent per-video copy —
+reloading only inside a throwaway `data-dir` copy doesn't change the template.

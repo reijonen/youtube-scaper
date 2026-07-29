@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-CAPTURES_DIR = Path(__file__).resolve().parent.parent / "gates" / "captures"
+CAPTURES_DIR = Path(__file__).resolve().parent / "captures"
 
 CAPTURE_FILES = {
     "video": "gate-c_video-plain.json",
