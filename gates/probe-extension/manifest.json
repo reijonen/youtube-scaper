@@ -1,0 +1,30 @@
+{
+  "manifest_version": 3,
+  "name": "YTS Probe",
+  "version": "0.0.1",
+  "description": "Throwaway probe. Verifies stable extension ID across profile copies and characterises YouTube watch-page payloads.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA9k9ZTf+jSsAuZqKqRzzORv2TD9XclwkaKpFzL7aluFyPeUi4d0IU6kYB86+rJaAZj6YUf5VRf1qCr6Crq+JkGyNqE/PPSYgA1beJjmZbisRpsPMl/hIm+4rgtqJSRemEOw6tUZHqlJi9uHLxfnuHVEGxGNufIICpvo72DRLWv09/FAFoJ99XFzOuW4N8hWM/fo+ATv4tESJ/1owOVQAxEHTAS/LTSTojDROcj0trD3w32zCZbUGoTFDm03guK1juPpaYu0C9gA1uGzJjVbHwhTSzpWR1A9UxtzPvsrvEAwtD7GNVWMfswZDEke4Hq9LYvZw/2o8R210KUlCWpl1HmQIDAQAB",
+  "background": {
+    "service_worker": "service-worker.js",
+    "type": "module"
+  },
+  "host_permissions": [
+    "https://*.youtube.com/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["https://*.youtube.com/*"],
+      "js": ["capture.js"],
+      "run_at": "document_start",
+      "world": "MAIN",
+      "all_frames": false
+    },
+    {
+      "matches": ["https://*.youtube.com/*"],
+      "js": ["collector.js"],
+      "run_at": "document_start",
+      "world": "ISOLATED",
+      "all_frames": false
+    }
+  ]
+}

@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# uv / venv
+.venv/
+
+# Runtime state (SPEC-V3: lives outside both Chrome profile dirs, but not source)
+data/
+run/
+*.log
+
+# Disposable and golden Chrome profiles (SPEC-V3: never committed, recreated/maintained locally)
+data-dir/
+data-dir-template/
+
+# gates/ is throwaway probe material; only the profile dirs it generated are excluded
+gates/data-dir/
+gates/data-dir-template/
+
+# Extension build output (Phase 6)
+extension/dist/
+extension/node_modules/
+
+# OS
+.DS_Store
