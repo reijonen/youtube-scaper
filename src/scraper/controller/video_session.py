@@ -68,6 +68,7 @@ class VideoSession:
         self._generation = 0
         self._current_generation = 0
         self._done = False
+        self._cap_stop_sent = False
 
         self._accumulator = RecommendationAccumulator()
         self._comments_collected = 0
@@ -97,21 +98,22 @@ class VideoSession:
             return self._done
 
     # -- Message handlers ---------------------------------------------------
-    # Each returns the response dict to send, or None if the message should
-    # produce no response (superseded generation, or an intentionally
-    # unacknowledged case).
+    # Each returns the response message(s) to send — a dict, a list of dicts
+    # if more than one frame must go out for a single incoming message, or
+    # None if the message should produce no response (superseded
+    # generation, or an intentionally unacknowledged case).
 
-    def handle_hello(self, msg: dict, generation: int) -> dict | None:
+    def handle_hello(self, msg: dict, generation: int) -> dict | list[dict] | None:
         if not self.is_current(generation):
             return None
         return protocol.build_hello_ack(self.run_id, self.video_id, self.video_url, self.config)
 
-    def handle_ping(self, msg: dict, generation: int) -> dict | None:
+    def handle_ping(self, msg: dict, generation: int) -> dict | list[dict] | None:
         if not self.is_current(generation):
             return None
         return protocol.build_pong()
 
-    def handle_payload(self, msg: dict, generation: int) -> dict | None:
+    def handle_payload(self, msg: dict, generation: int) -> dict | list[dict] | None:
         if not self.is_current(generation):
             return None
 
@@ -162,7 +164,28 @@ class VideoSession:
         self._seen_batch_ids.add(batch_id)
         self._payload_count += 1
         self._total_bytes += encoded_size
-        return protocol.build_payload_ack(batch_id)
+        ack = protocol.build_payload_ack(batch_id)
+
+        # Only the controller's parser knows the true stored (deduped,
+        # non-video-entries-discarded) count; the extension cannot compute
+        # this itself. So the cap is enforced here, not in the collector:
+        # once reached, `stop` is sent alongside this ack, mid-video, ahead
+        # of any video_done from the extension. The collector's contract
+        # (extension/src/collector.ts) is to treat a `stop` received before
+        # it has itself reported completion as "the cap was hit — stop
+        # scrolling and send video_done(reason=max_recommendations_reached)"
+        # — as opposed to a `stop` arriving after its own video_done, which
+        # is just the ordinary end-of-session teardown signal.
+        max_recommendations = self.config.get("maxRecommendations")
+        if (
+            not self._cap_stop_sent
+            and max_recommendations is not None
+            and len(self._accumulator.recommendations) >= max_recommendations
+        ):
+            self._cap_stop_sent = True
+            return [ack, protocol.build_stop()]
+
+        return ack
 
     def _check_caps(self, batch_id: str, encoded_size: int) -> dict | None:
         if encoded_size > self._caps.max_payload_bytes:

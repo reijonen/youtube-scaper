@@ -15,12 +15,12 @@ RAW_PAYLOAD_DIR = PROJECT_ROOT / "data" / "raw"
 NATIVE_HOST_WRAPPER = PROJECT_ROOT / "bin" / "scraper-native-host"
 NATIVE_HOST_MANIFEST_NAME = "com.sor.yts"
 
-# Placeholder until Phase 6 generates the extension's pinned RSA keypair and
-# derives the real ID from its DER public key (SPEC-V3, "Extension
-# identity"). Chrome IDs are always 32 lowercase a-p letters; this satisfies
-# that shape so Phase 5's manifest-writing code and tests exercise the real
-# format without depending on Phase 6 existing yet.
-EXTENSION_ID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+# Derived from the SHA-256 of the DER-encoded public half of keys/extension.pem
+# (SPEC-V3, "Extension identity"): first 16 hash bytes, each nibble mapped to
+# a-p. keys/extension.pem is gitignored and irreplaceable — losing it means
+# generating a new keypair and a new ID, which must then be re-pinned here
+# and in extension/manifest.json's "key" field together.
+EXTENSION_ID = "jpmplblenfdmgpejcdpphhncckpdimpb"
 
 # Chrome flags fixed by SPEC-V3, "Fixed paths". --user-data-dir and
 # --profile-directory are supplied by the launcher, not listed here.
@@ -62,3 +62,16 @@ CONNECTION_IDLE_TIMEOUT_S = 30.0
 # input caps above. Provisional operational tuning.
 CHROME_STARTUP_HANDSHAKE_DEADLINE_S = 30.0
 CHROME_GRACEFUL_TERMINATE_DEADLINE_S = 10.0
+
+# The extension-side circuit breakers SPEC-V3 requires to be configurable
+# ("Completion condition": "maximum page duration, maximum scroll rounds...
+# page-ready timeout, and acknowledgement timeout") but, again, doesn't pin
+# numbers for. These are sent to the extension as hello_ack.config — see
+# extension/src/protocol.ts, CollectionConfig, which mirrors this shape
+# field-for-field. Not yet consumed by VideoSession itself (Phase 7 wires
+# a controller-built config dict into hello_ack); listed here so Phase 7
+# only has to assemble the dict, not invent the values.
+PAGE_READY_TIMEOUT_MS = 15_000
+ACK_TIMEOUT_MS = 10_000
+MAX_SCROLL_ROUNDS = 200
+MAX_PAGE_DURATION_MS = 20 * 60 * 1000

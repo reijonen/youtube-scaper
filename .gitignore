@@ -22,9 +22,20 @@ run/
 # gates/data-dir-template committed, it's the fixture the probe was built against
 gates/data-dir/
 
-# Extension build output (Phase 6)
-extension/dist/
+# Extension build output (Phase 6). SPEC-V3 loads the extension unpacked
+# directly from extension/, not from a subdirectory, so esbuild writes its
+# bundles into extension/ itself rather than extension/dist/.
+extension/capture.js
+extension/collector.js
+extension/service-worker.js
+extension/*.js.map
 extension/node_modules/
+
+# Extension signing key (Phase 6). Private; the extension ID is derived from
+# it and is pinned into manifest.json's "key" field and config.EXTENSION_ID,
+# so losing this file means generating a new keypair and a new ID. Back it
+# up outside the repo.
+/keys/
 
 # OS
 .DS_Store

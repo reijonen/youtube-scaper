@@ -172,3 +172,113 @@ launched against a fresh copy, the extension (not yet built) never
 connected, `HandshakeTimeout` fired at the configured deadline, and Chrome
 exited cleanly (code 0) with `data-dir` removed.
 → Manual run, not committed to the repo.
+
+## Phase 6 — Extension
+
+**The recommendation cap is enforced by the controller, not the extension,
+via a mid-video `stop`.** Confirmed with the user before implementing (two
+options were presented: the collector self-counting sidebar entries in JS,
+or the controller — which alone knows the true post-filter, post-dedup
+stored count — deciding). `VideoSession.handle_payload` now returns
+`[payload_ack, stop]` once the accumulated stored count reaches
+`config["maxRecommendations"]`, ahead of any `video_done` from the
+extension. `stop` therefore has two meanings depending on when it arrives:
+mid-video (before the collector's own completion report) it means "the cap
+was hit, report `video_done(reason=max_recommendations_reached)`"; after the
+collector's own completion report, it's the ordinary end-of-session signal.
+This required extending `dispatch`'s return contract from `dict | None` to
+`dict | list[dict] | None` and teaching `connection.py` to write each
+message in the list as its own frame.
+→ `src/scraper/controller/video_session.py`, `handle_payload`.
+→ `extension/src/collector.ts`, `Collector.handleStop`.
+
+**Chain exhaustion (the other completion reason) *is* decided by the
+collector**, unlike the cap — SPEC-V3 states this explicitly ("Collector
+script... decides when a video is complete") and it needs no full parse,
+only checking whether a payload's sidebar entry list ends in a
+`continuationItemRenderer`. This is the same JSON path
+`src/scraper/parser/recommendations.py`'s `_iter_sidebar_entries` uses,
+ported to a much smaller existence check rather than a duplicated parser.
+→ `extension/src/collector.ts`, `sidebarEntries` / `hasFurtherContinuation`.
+
+**Detection scope is honestly incomplete for four of the twelve error
+codes.** `PAGE_READY_TIMEOUT`, `UNEXPECTED_NAVIGATION`, and
+`SHORTS_EXCLUDED` are wired up (all mechanical: a deadline, a host/path
+check). `CONSENT_WALL`, `AGE_RESTRICTED`, `LOGIN_REQUIRED`, and
+`VIDEO_UNAVAILABLE` are not — triggering them correctly would need a
+verified `playabilityStatus` value from a real capture of each state, and
+none exist in `gates/captures/` (only an ordinary video, a finished live
+stream, and a premiere). PLAN.md's ground rules forbid guessing YouTube's
+payload shape. If one of these states is hit in practice it still fails
+loudly — as `PAGE_READY_TIMEOUT` (no initial payload ever arrives) or
+`SCHEMA_UNRECOGNISED` (a payload arrives but doesn't match) — just not
+under its more specific code. Revisit if a capture of one of these states
+is ever obtained.
+→ `extension/src/service-worker.ts`, module docstring.
+
+**The collector <-> service-worker channel is a long-lived
+`chrome.runtime.Port`, not per-message `sendMessage` calls.** Not part of
+SPEC-V3's wire protocol (that's the controller <-> extension side, fixed by
+the spec's message table) — this is purely internal, so it's a free design
+choice. A Port was chosen over one-off `sendMessage` because the service
+worker must be able to push to the collector unprompted (a cap-triggered
+`stop`, a `pause` on native disconnect), not only reply to collector-
+initiated requests.
+→ `extension/src/internal-protocol.ts`, module docstring.
+
+**`hello_ack.config`'s shape (`CollectionConfig`) is a free design choice
+formalised now, not something SPEC-V3 pins down.** SPEC-V3 only names the
+category ("collection configuration") and separately requires several
+circuit breakers to be configurable without giving field names. Fixed as
+`{maxRecommendations, scrollDelayMs, delayJitter, pageReadyTimeoutMs,
+ackTimeoutMs, maxScrollRounds, maxPageDurationMs}`, mirrored field-for-field
+between `config.py` (provisional values, same pattern as the Phase 3 input
+caps) and `protocol.ts`. Phase 7 only has to assemble this dict when
+constructing `VideoSession`; the shape itself doesn't need revisiting.
+→ `src/scraper/config.py`, comment above `PAGE_READY_TIMEOUT_MS`.
+→ `extension/src/protocol.ts`, `CollectionConfig`.
+
+**Native-port reconnect backoff uses `setTimeout`, not `chrome.alarms`.**
+SPEC-V3 ties `chrome.alarms` specifically to the heartbeat's scheduling
+floor, not to reconnection generally, and a `setTimeout`-based exponential
+backoff (250ms-10s) fits a reconnect attempt that resolves within seconds
+of an active disconnect event — which itself keeps the service worker
+alive — far better than alarms' coarse minimum granularity would.
+→ `extension/src/native-port.ts`, module docstring.
+
+**Extension build output lands directly in `extension/`, not
+`extension/dist/`.** SPEC-V3 states the extension is loaded unpacked from
+`.../scraper/extension` itself ("Extension identity"), not a subdirectory.
+Phase 0's `.gitignore` had anticipated a `dist/` subdirectory before this
+was pinned down; fixed to ignore the three built bundles directly under
+`extension/` instead.
+→ `.gitignore`, "Extension build output" section.
+
+**The extension's signing key lives at `keys/extension.pem` (project
+root), gitignored, generated fresh — never the throwaway key at
+`gates/keys/probe.pem`.** The extension ID is deterministically derived
+from it (SHA-256 of the DER public key, first 16 bytes, each nibble mapped
+to a-p — verified against the probe's own known ID before trusting the
+algorithm for the real key). Losing this file means generating a new
+keypair and a new ID, which breaks the pinned `allowed_origins` in every
+copy of the native-messaging manifest until `config.EXTENSION_ID` and
+`extension/manifest.json`'s `key` field are both re-pinned together. It
+must be backed up outside the repo.
+→ `.gitignore`, "Extension signing key" section.
+→ `src/scraper/config.py`, comment above `EXTENSION_ID`.
+
+**Confirmed empirically, not assumed: retail Google Chrome ignores
+`--load-extension` on the command line even with Developer Mode on and no
+enterprise policies present** (verified via `chrome://policy`,
+`chrome://version`, and CDP inspection of `chrome://extensions` — spent
+real effort trying to script around this before concluding it's
+intentional anti-malware hardening, not a local misconfiguration). This is
+exactly why SPEC-V3's "One-time template creation" has the user load the
+extension through the `chrome://extensions` UI by hand rather than the
+controller automating it — there is no scriptable alternative on Stable-
+channel Chrome. The user did this once, manually, against a copy of
+`data-dir-template`; Phase 6's exit criterion (extension loads with the
+expected ID, connects through the bridge, completes a handshake) was then
+verified against that real template using a real `ChromeSession` and a real
+`ControllerServer`, not a fake one.
+→ Manual run, not committed to the repo.

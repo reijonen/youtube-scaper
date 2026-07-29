@@ -54,8 +54,10 @@ def handle_connection(
             return
 
         if response is not None:
+            messages = response if isinstance(response, list) else [response]
             try:
-                framing.write_frame(sock, protocol.encode_message(response))
+                for message in messages:
+                    framing.write_frame(sock, protocol.encode_message(message))
             except OSError as exc:
                 logger.warning("failed to write response, closing: %s", exc)
                 return
