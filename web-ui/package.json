@@ -23,6 +23,10 @@
 		"vitest": "^4.1.8"
 	},
 	"dependencies": {
-		"better-sqlite3": "^13.0.2"
+		"@sigma/node-image": "^3.0.0",
+		"better-sqlite3": "^13.0.2",
+		"graphology": "^0.26.0",
+		"graphology-layout-forceatlas2": "^0.10.1",
+		"sigma": "^3.0.3"
 	}
 }

@@ -165,3 +165,77 @@ governs this project.
 - The cache directory resolves relative to the route file's own location
   (`import.meta.url`, four levels up to `web-ui/`), the same pattern as `db.ts` in Phase 1,
   for the same reason - no assumption about the process's working directory.
+
+## Phase 5 — Total mode
+
+- **SPEC.md's claim that "dashed edges are a built-in Sigma edge type" is false**,
+  discovered before writing any rendering code (grepped the installed `sigma@3.0.3`
+  source for "dash" — zero matches; checked the CHANGELOG — never mentioned; checked the
+  npm registry for an `@sigma/edge-*` dash package — none exists). Raised with the user;
+  resolved as color + reduced opacity only, using Sigma's default solid edge program. Both
+  SPEC.md and PLAN.md corrected in place (see their Stack/Collaborator rendering sections
+  and Phase 5's gotchas). Full account in `feedback_verify_spec_numbers_before_coding`
+  (session memory) alongside the earlier Phase 2 edge-count issue — same pattern: a
+  spec's factual claim didn't survive being checked against the actual installed package.
+- **Sigma, `@sigma/node-image`, and `graphology-layout-forceatlas2/worker` are all loaded
+  via dynamic `import()` inside `onMount`, never as static top-level imports.** All three
+  reference browser-only globals (`WebGL2RenderingContext`, `Worker`) at module scope.
+  Statically importing any of them crashed SvelteKit's SSR pass with
+  `ReferenceError: WebGL2RenderingContext is not defined` — verified live, then fixed by
+  moving the imports inside `onMount`, which never runs during SSR. `graphology` and the
+  synchronous `graphology-layout-forceatlas2` (used only for `inferSettings`) stayed as
+  static imports; their module scope has no browser-global references (checked directly).
+- **The view registry's server-only-import guard (flagged as a risk in Phase 3
+  DECISIONS.md) did fire once real Sigma code existed**, with
+  `Cannot import $lib/server/queries/channelGraph.ts into code that runs in the browser`
+  from `+layout.svelte → $lib/views/index.ts → manifest.ts → channelGraph.ts`. (It hadn't
+  fired during Phase 3's own testing — apparently order- or cache-dependent in dev — but
+  reproduced reliably here across full server restarts, so it needed a real fix, not just
+  a re-test.) Fixed the same way as the Sigma SSR crash: `manifest.ts`'s `load` field wraps
+  the `getChannelGraph` import in a dynamic `import('$lib/server/queries/channelGraph')`
+  instead of a static one. SvelteKit's guard evidently doesn't flag dynamic-import
+  specifiers the same way it flags static ones, and since `load` is only ever *called* from
+  server-side code (`+page.server.ts`), the dynamically-imported chunk is never actually
+  evaluated in the browser either way. `manifest.ts`'s only remaining top-level import from
+  `$lib/server` is `import type { ChannelGraph }`, which is type-only and erased entirely.
+- **Sigma's canvases stayed stuck at the browser's default 300×150 `<canvas>` size** on an
+  early run despite the container being correctly sized (confirmed via
+  `container.offsetWidth/Height` logged immediately before `new Sigma(...)`) - a one-off
+  dev-server/HMR glitch during iteration, not a real bug: a clean full restart (stopping
+  the dev server, deleting `.svelte-kit/`, restarting) reproduced correct sizing every
+  time after that, and the resize is driven by Sigma's own `resize()` call at construction
+  plus a `window` `resize` listener, not by anything this code controls.
+- Node/edge visual encoding, chosen and tuned by eye against the real graph:
+  - Seed nodes: fixed size 9, flat gray (`#4b5563`), plain (no image/avatar - seeds are
+    videos, not channels).
+  - Channel nodes: size `4 + sqrt(totalWeight) * 6` (a fixed floor for zero-weight
+    collaborator-only channels, per SPEC.md), filled with the channel's avatar via
+    `@sigma/node-image`'s `NodeImageProgram`, `image: '/avatars/' + channelId` (Phase 4's
+    route). Fallback background color (shown before the image loads or if a channel has no
+    avatar) is the same hash-of-label-to-hue function used for the avatar route's own SVG
+    fallback in Phase 4, duplicated rather than shared, since one is server code and the
+    other is client code with no natural common module.
+  - Weighted edges: solid, `rgba(100,100,220,0.55)`. Collaborator edges:
+    `rgba(150,150,150,0.25)` - visibly fainter and a different hue, satisfying "distinct
+    color, at reduced opacity" without any custom shader.
+  - Graph node keys are prefixed (`seed:<id>` / `channel:<id>`) rather than using the raw
+    `video_id`/`channel_id` directly, so a coincidental string collision between a video id
+    and a channel id (not currently possible given YouTube's id formats, but not something
+    to rely on) can never merge two unrelated nodes into one.
+- **`IMAGE_NODE_THRESHOLD = 300`, not the more conservative 150 first tried.** The real
+  dataset has 216 total nodes (212 channels + 4 seeds); at 150 every node would always
+  fall back to plain circles today, which technically satisfies the spec's fallback
+  requirement but defeats the point of having avatars at all against current data. 300
+  keeps today's graph fully illustrated while still guarding against unbounded growth.
+  Verified both states directly: at a temporarily-lowered threshold, confirmed the
+  fallback (plain circles, matching the spot-check figures for cluster shape); at 300,
+  confirmed real avatar images load through the Phase 4 route (`GET /avatars/<id>` → 200,
+  visible in the network log) and render as the node fill.
+- ForceAtlas2 runs via the worker-based `FA2LayoutSupervisor`
+  (`graphology-layout-forceatlas2/worker`), started in `onMount` and stopped after a fixed
+  4-second settle timer (`setTimeout`), rather than run indefinitely or for a fixed
+  iteration count - the supervisor's start/stop API doesn't expose iteration counts, and a
+  static dataset like this has no ongoing reason to keep recomputing layout after it
+  settles. `layout.kill()` and `sigmaInstance.kill()` both run in `onDestroy`.
+- Added `.claude/launch.json` (`web-ui-dev`, `npm run dev --prefix web-ui`, port 5173) to
+  drive the in-app browser preview tool against this project during development/testing.

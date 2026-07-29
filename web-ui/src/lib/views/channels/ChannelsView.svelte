@@ -1,5 +1,6 @@
 <script lang="ts">
 	import type { ChannelGraph } from '$lib/server/queries/channelGraph';
+	import TotalModeGraph from './TotalModeGraph.svelte';
 
 	let { data }: { data: ChannelGraph } = $props();
 
@@ -11,7 +12,6 @@
 	);
 </script>
 
-<!-- Placeholder pending Phase 5/6 (Sigma total mode, ranked per-seed mode). -->
 <dl>
 	<dt>Seed videos</dt>
 	<dd>{seedCount}</dd>
@@ -19,6 +19,9 @@
 	<dd>{channelCount}</dd>
 	<dt>Weighted edges</dt>
 	<dd>{weightedEdgeCount}</dd>
-	<dt>Dashed collaborator edges</dt>
+	<dt>Collaborator edges</dt>
 	<dd>{collaboratorEdgeCount}</dd>
 </dl>
+
+<!-- Per-seed ranked mode and the mode toggle are Phase 6. -->
+<TotalModeGraph {data} />

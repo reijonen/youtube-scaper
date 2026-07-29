@@ -42,10 +42,17 @@ renderer is not the part of this application worth doing twice. graphology also 
 analytical satellite libraries (metrics, community detection) that later views will want,
 so the graph model is not a dead end.
 
-Two capabilities the specified view needs are native to this stack rather than custom
-work: dashed edges are a built-in Sigma edge type, and image-filled nodes are provided by
-`@sigma/node-image`. ForceAtlas2 runs in a web worker, so layout iteration never blocks
-the UI.
+One capability the specified view needs is native to this stack rather than custom work:
+image-filled nodes, provided by `@sigma/node-image`. ForceAtlas2 runs in a web worker, so
+layout iteration never blocks the UI.
+
+Sigma has no built-in dashed edge type — this was checked directly against the installed
+`sigma` 3.0.3 source, its changelog, and the npm registry before committing to it, and no
+such capability or companion package exists. Achieving an actual dash pattern would mean
+a hand-written WebGL edge shader, which is out of proportion to what collaborator edges
+need to communicate. Collaborator edges are instead distinguished from weighted edges by
+color and reduced opacity alone, both already part of this spec's intent, using Sigma's
+default (solid) edge program.
 
 One known limit shapes the design: Sigma renders very large graphs comfortably with default
 styles but degrades well before that when every node carries an image. The view therefore
@@ -220,8 +227,8 @@ edges.
 **A pair with any position-0 credit is a weighted edge, never a collaborator edge.** A
 channel can be the main channel on one recommendation and a collaborator on another within
 the same seed. Such a pair is drawn once, as a weighted edge; its collaborator appearances
-add nothing to the weight and produce no second edge. A dashed collaborator edge exists
-only for a pair with no position-0 credit anywhere in that seed.
+add nothing to the weight and produce no second edge. A reduced-opacity collaborator edge
+exists only for a pair with no position-0 credit anywhere in that seed.
 
 **The unweighted credit count is always displayed alongside the weighted score, never
 instead of it.** A score whose derivation is invisible is not interpretable.
@@ -262,14 +269,14 @@ one, and is drawn directly in the component. Both modes read the same query outp
 
 ### Collaborator rendering
 
-Channels at position above 0 appear as nodes connected by **dashed edges at reduced
-opacity**, carrying zero weight — except where that same `(seed, channel)` pair also has a
-position-0 credit, in which case the weighted edge stands alone and no dashed edge is
-drawn. Against current data that is 18 dashed edges, from 23 collaborator credits of which
-5 fall on pairs that are already weighted.
+Channels at position above 0 appear as nodes connected by edges in a **distinct color, at
+reduced opacity**, carrying zero weight — except where that same `(seed, channel)` pair
+also has a position-0 credit, in which case the weighted edge stands alone and no
+collaborator edge is drawn. Against current data that is 18 collaborator edges, from 23
+collaborator credits of which 5 fall on pairs that are already weighted.
 
 This keeps two distinct realities visible without conflating them: a channel network
-inflating one slot with many avatars reads as a recognisable dashed cluster, while a
+inflating one slot with many avatars reads as a recognisable faint cluster, while a
 legitimate collaborator that never uploads under its own name still appears in the graph
 rather than vanishing from it.
 

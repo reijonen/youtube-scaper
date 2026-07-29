@@ -102,8 +102,8 @@ The core logic of the entire view. Everything that can be silently wrong lives h
   edge's credit count. Carry both — the spec requires both to be displayable, never the
   score alone.
 - Collaborator edges: pairs credited only at `position > 0`, weight zero, flagged so the
-  renderer can dash them. A pair with any position-0 credit is a weighted edge and gets no
-  dashed edge — see Gotchas.
+  renderer can style them (reduced opacity, distinct color). A pair with any position-0
+  credit is a weighted edge and gets no collaborator edge — see Gotchas.
 - Channel label: `handle`, falling back to `name`.
 - A source-resolution function mapping a seed video to its graph node. It returns the seed
   video itself. It exists as a single named function because a future channel-to-channel
@@ -122,9 +122,9 @@ The core logic of the entire view. Everything that can be silently wrong lives h
   recommendation and a collaborator on another within the same seed — 5 pairs are like this
   in the current data. Resolve it as: any position-0 credit makes the pair a weighted edge,
   and its collaborator appearances then contribute nothing and produce no second edge.
-  Compute weighted pairs first, then emit dashed edges only for collaborator pairs not
-  already in that set. Getting this wrong yields parallel solid-and-dashed edges between
-  the same two nodes.
+  Compute weighted pairs first, then emit collaborator edges only for pairs not already in
+  that set. Getting this wrong yields parallel weighted-and-collaborator edges between the
+  same two nodes.
 
 ### Tests
 
@@ -139,7 +139,7 @@ Vitest, against a small fixture database created in test setup. Never against
   weight is the sum and whose credit count is the number of recommendations — not parallel
   edges.
 - A `(seed, channel)` pair credited both at position 0 and as a collaborator yields exactly
-  one weighted edge and no dashed edge.
+  one weighted edge and no collaborator edge.
 - Per-seed grouping isolates seeds: a channel in two seeds yields two distinct edges, not a
   merged one.
 - A completed video with no recommendations yields an isolated seed node.
@@ -200,7 +200,7 @@ deleting the cache directory recovers cleanly.
 - Node size from total weighted score across all seeds; zero-weight channels render at a
   fixed minimum size so they stay visible and hoverable.
 - Node fill from the avatar route via `@sigma/node-image`.
-- Collaborator edges rendered dashed and at reduced opacity.
+- Collaborator edges rendered in a distinct color, at reduced opacity.
 - A node reducer dropping image fills for plain colored circles once the visible node count
   passes the threshold where image nodes stop performing.
 
@@ -213,12 +213,17 @@ deleting the cache directory recovers cleanly.
   layout.
 - The reducer is a rendering concern only. It must not alter weights, sizes-as-data, or
   anything the query produced.
+- **Sigma has no built-in dashed edge type.** Checked directly against the installed
+  `sigma` source, its changelog, and the npm registry — no such capability or companion
+  package exists. Don't reach for a custom WebGL edge shader to get literal dashing; render
+  collaborator edges with Sigma's default (solid) edge program, distinguished by color and
+  reduced opacity only.
 
 ### Done when
 
 The graph renders against the real database, multi-seed channels visibly settle toward the
 centre, single-seed channels sit on the fringe, and the three collaborator clusters are
-identifiable by their dashed edges.
+identifiable by their color and reduced opacity.
 
 ## Phase 6 — Per-seed mode and interaction
 
@@ -259,7 +264,7 @@ grown, the shape should still hold.
 | …of which are credited by more than one recommendation | 27 |
 | Collaborator credits (`position > 0`) | 23 |
 | …falling on pairs that already have a position-0 credit | 5 |
-| **Dashed edges** — collaborator pairs, overlap excluded | **18** |
+| **Collaborator edges** (reduced opacity) — pairs, overlap excluded | **18** |
 | Total edges of any kind (263 + 18) | 281 |
 | `raw_position` range | 1–146 |
 
