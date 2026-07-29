@@ -95,3 +95,26 @@ degrading, e.g. by proceeding with a mismatched version) satisfies "aborts
 the run with a clear error rather than degrading" in the absence of a
 defined message to carry that error.
 → `src/scraper/controller/connection.py`, `handle_connection`.
+
+## Phase 4 — Native host bridge
+
+**The bridge's `controller_unavailable` notification has no SPEC-V3-defined
+wire shape.** SPEC-V3 names the behaviour ("the bridge reports a structured
+controller-unavailable error and the extension pauses") but not a message
+schema — and this message can't be one of the controller protocol's 12
+types, since by definition the controller is unreachable when it fires. It
+mirrors the `{type, protocolVersion}` convention used elsewhere, synthesized
+locally by the bridge, never touching the controller socket.
+→ `src/scraper/native_host.py`, `CONTROLLER_UNAVAILABLE_MESSAGE_TYPE`.
+
+**Known limitation: while stuck in the reconnect backoff loop, the bridge
+doesn't detect Chrome closing stdin.** It only checks for stdin EOF while
+actively forwarding (inside `_forward_until_disconnect`); during a
+disconnected retry loop it just sleeps and retries. Detecting EOF on a pipe
+without consuming real data isn't reliably possible without OS-specific
+tricks (there's no cross-platform non-consuming peek for arbitrary pipes,
+unlike sockets' `MSG_PEEK`). In practice this is likely fine: Chrome
+terminates the native host process directly (signal) rather than relying on
+stdin EOF as the sole shutdown signal. Left undone rather than adding a
+fragile workaround for a scenario outside PLAN.md's Phase 4 exit criteria.
+→ `src/scraper/native_host.py`, `Bridge.run`.

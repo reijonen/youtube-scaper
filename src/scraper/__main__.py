@@ -3,7 +3,7 @@
 import argparse
 import sys
 
-from scraper import config
+from scraper import config, native_host
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -53,7 +53,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "controller":
         raise NotImplementedError("controller is implemented in a later phase")
     elif args.command == "native-host":
-        raise NotImplementedError("native-host is implemented in a later phase")
+        return native_host.main()
 
     return 1
 
