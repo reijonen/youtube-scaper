@@ -212,6 +212,17 @@ This is the standard DCG discount: slot 1 scores 1.00, slot 2 scores 0.63, slot 
 0.29, slot 100 scores 0.15. It is steep enough to express position bias and gentle enough
 that entries below the fold remain visible.
 
+**One edge per `(seed, channel)` pair.** The sum above is the edge's weight, and the number
+of recommendations contributing to it is that edge's credit count. A seed that recommends
+the same channel several times yields one edge carrying the combined weight, never parallel
+edges.
+
+**A pair with any position-0 credit is a weighted edge, never a collaborator edge.** A
+channel can be the main channel on one recommendation and a collaborator on another within
+the same seed. Such a pair is drawn once, as a weighted edge; its collaborator appearances
+add nothing to the weight and produce no second edge. A dashed collaborator edge exists
+only for a pair with no position-0 credit anywhere in that seed.
+
 **The unweighted credit count is always displayed alongside the weighted score, never
 instead of it.** A score whose derivation is invisible is not interpretable.
 
@@ -232,8 +243,8 @@ A force-directed bipartite graph, rendered by Sigma with ForceAtlas2 layout.
   zero weight render at a fixed minimum size so they remain visible and hoverable.
 - **Node fill:** the channel's avatar, served from the avatar cache, subject to the
   image-node threshold described under *Stack*.
-- **Edges:** seed video → channel, weighted by `weight(c, s)`. Against current data, 355
-  weighted edges.
+- **Edges:** seed video → channel, one per pair, weighted by `weight(c, s)`. Against
+  current data, 263 weighted edges carrying 355 credits between them.
 
 The layout carries the finding: channels recommended across multiple seeds are pulled
 toward the centre, channels appearing in a single seed settle on the fringe.
@@ -252,7 +263,10 @@ one, and is drawn directly in the component. Both modes read the same query outp
 ### Collaborator rendering
 
 Channels at position above 0 appear as nodes connected by **dashed edges at reduced
-opacity**, carrying zero weight. Against current data that is 23 dashed edges.
+opacity**, carrying zero weight — except where that same `(seed, channel)` pair also has a
+position-0 credit, in which case the weighted edge stands alone and no dashed edge is
+drawn. Against current data that is 18 dashed edges, from 23 collaborator credits of which
+5 fall on pairs that are already weighted.
 
 This keeps two distinct realities visible without conflating them: a channel network
 inflating one slot with many avatars reads as a recognisable dashed cluster, while a

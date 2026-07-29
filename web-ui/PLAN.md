@@ -90,15 +90,20 @@ The core logic of the entire view. Everything that can be silently wrong lives h
   recommendations, which appear as isolated nodes.
 - Channel nodes: every distinct `channel_id` in `recommendation_channels`, whether or not
   it carries weight.
-- Weighted edges: for each recommendation, the channel at `position = 0` only, with
+- Weighted edges: **one edge per `(seed, channel)` pair**, never one per recommendation.
+  For every recommendation in that seed whose `position = 0` channel is that channel,
+  accumulate
 
   ```
   weight = 1 / log2(1 + raw_position)
   ```
 
-  summed per `(seed, channel)` pair. Carry the unweighted credit count alongside every
-  weighted score — the spec requires both to be displayable, never the score alone.
-- Collaborator edges: `position > 0`, weight zero, flagged so the renderer can dash them.
+  The edge's weight is that sum; the number of recommendations contributing to it is that
+  edge's credit count. Carry both — the spec requires both to be displayable, never the
+  score alone.
+- Collaborator edges: pairs credited only at `position > 0`, weight zero, flagged so the
+  renderer can dash them. A pair with any position-0 credit is a weighted edge and gets no
+  dashed edge — see Gotchas.
 - Channel label: `handle`, falling back to `name`.
 - A source-resolution function mapping a seed video to its graph node. It returns the seed
   video itself. It exists as a single named function because a future channel-to-channel
@@ -113,6 +118,13 @@ The core logic of the entire view. Everything that can be silently wrong lives h
 - `run_id` is ignored entirely. Do not filter, group, or label by it.
 - Do not read `runs`, `raw_payloads`, or `received_batches`. From `videos`, read only
   `video_id` and `status`.
+- **A `(seed, channel)` pair can be both.** A channel may be the main channel on one
+  recommendation and a collaborator on another within the same seed — 5 pairs are like this
+  in the current data. Resolve it as: any position-0 credit makes the pair a weighted edge,
+  and its collaborator appearances then contribute nothing and produce no second edge.
+  Compute weighted pairs first, then emit dashed edges only for collaborator pairs not
+  already in that set. Getting this wrong yields parallel solid-and-dashed edges between
+  the same two nodes.
 
 ### Tests
 
@@ -123,6 +135,11 @@ Vitest, against a small fixture database created in test setup. Never against
 - A recommendation with several channels contributes weight to the `position = 0` channel
   only, and the others appear as zero-weight collaborator edges.
 - A channel appearing only as a collaborator is present as a node with total weight zero.
+- A seed crediting the same channel on several recommendations yields **one** edge whose
+  weight is the sum and whose credit count is the number of recommendations — not parallel
+  edges.
+- A `(seed, channel)` pair credited both at position 0 and as a collaborator yields exactly
+  one weighted edge and no dashed edge.
 - Per-seed grouping isolates seeds: a channel in two seeds yields two distinct edges, not a
   merged one.
 - A completed video with no recommendations yields an isolated seed node.
@@ -131,9 +148,10 @@ Vitest, against a small fixture database created in test setup. Never against
 
 ### Done when
 
-Tests pass, and running the query against the real database yields the shape the spec
-describes: 212 channel nodes with 197 carrying weight, 355 weighted edges, 23 dashed
-collaborator edges. Treat a mismatch as a bug in the query, not as stale documentation.
+Tests pass, and running the query against the real database reproduces the figures in
+*Verification against real data* at the end of this document. Treat a mismatch as a bug in
+the query, not as stale documentation — but if a figure appears internally inconsistent,
+say so rather than picking whichever reading matches your code.
 
 ## Phase 3 — View registry
 
@@ -236,9 +254,22 @@ grown, the shape should still hold.
 | Distinct channel nodes | 212 |
 | Channels carrying weight | 197 |
 | Collaborator-only channels (zero weight) | 15 |
-| Weighted edges | 355 |
-| Dashed collaborator edges | 23 |
+| Recommendations, each with exactly one position-0 channel | 355 |
+| **Weighted edges** — distinct `(seed, channel)` pairs | **263** |
+| …of which are credited by more than one recommendation | 27 |
+| Collaborator credits (`position > 0`) | 23 |
+| …falling on pairs that already have a position-0 credit | 5 |
+| **Dashed edges** — collaborator pairs, overlap excluded | **18** |
+| Total edges of any kind (263 + 18) | 281 |
 | `raw_position` range | 1–146 |
+
+Note the distinction between 355 and 263: 355 is the number of weighted *credits*, and 263
+is the number of *edges* those credits collapse into. Both matter — the credit count is
+displayed alongside every weighted score — but only 263 edges are drawn.
+
+Heaviest edges, for a spot check: Numberphile in `JEPqrqNqkHw` (23 credits, weight ≈ 4.724),
+Numberphile in `1cvKGqgOx_8` (20 credits, ≈ 4.669), Numberphile in `cOTf_YEmSOU`
+(18 credits, ≈ 3.945), Classic 80s Mix in `dQw4w9WgXcQ` (7 credits, ≈ 1.559).
 
 The three multi-channel recommendations are recognisable: a nine-channel cluster
 ("No Fluff …"), a three-channel music cluster, and a four-channel shorts cluster. Two
