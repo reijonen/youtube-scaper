@@ -239,3 +239,43 @@ governs this project.
   settles. `layout.kill()` and `sigmaInstance.kill()` both run in `onDestroy`.
 - Added `.claude/launch.json` (`web-ui-dev`, `npm run dev --prefix web-ui`, port 5173) to
   drive the in-app browser preview tool against this project during development/testing.
+
+## Phase 6 — Per-seed mode and interaction
+
+- Mode/seed-selection state (`mode`, `selectedSeedId`) lives in `ChannelsView.svelte`,
+  the parent of both `TotalModeGraph` and `PerSeedRanked`, rather than inside either mode
+  component. Neither mode component unmounts-and-loses-state the other's context this way;
+  toggling `Total → Per-seed → Total → Per-seed` keeps the same seed selected throughout -
+  verified live by switching modes twice and confirming the `<select>` still showed the
+  seed chosen before the first switch. This is what PLAN.md's "the toggle preserves
+  selection sensibly" means in practice.
+- `breakdown.ts`'s `channelBreakdown(data, channelId)` is the single shared function both
+  modes use for the hover tooltip's per-seed data (weight + credit count per seed a
+  channel appears in) - computed from `data.edges` alone, filtered by `target`, no new
+  query needed since Phase 2's output already carries everything required.
+- **Verifying hover interaction against Sigma's WebGL canvas was the hard part of this
+  phase**, and is worth recording since it's non-obvious. A programmatically-dispatched
+  `MouseEvent('mousemove', {clientX, clientY, bubbles: true})` on the container element
+  reliably reached Sigma's `MouseCaptor` (which listens on `document` and checks
+  `e.target === this.container`), but `sigma.getNodeAtPosition()` still returned `null`
+  even when called directly with the exact viewport coordinates `graphToViewport()`
+  reported for a known node - true for both image-typed and plain default-typed nodes, so
+  it wasn't specific to `@sigma/node-image`. Root cause not fully chased down (likely the
+  picking framebuffer needing a real paint/composite cycle that a synthetic, teleported
+  event doesn't trigger the same way genuine OS-level pointer movement does). What
+  actually worked: computing the node's target position via
+  `sigma.graphToViewport(sigma.getNodeDisplayData(nodeId))` plus the container's
+  `getBoundingClientRect()`, converting to the browser tool's screenshot-pixel space
+  (`realPixel * (screenshotWidth / window.innerWidth)`), then issuing a **real** simulated
+  hover through the browser automation tool (not a JS-dispatched event) at that
+  coordinate - this reliably fired `enterNode` and rendered the tooltip with correct data
+  (spot-checked against RobWords' known per-seed weights). Lesson for next time: verify
+  Sigma hover/click interaction with the automation tool's real pointer actions, not
+  synthetic `dispatchEvent` calls - the latter can silently fail Sigma's internal picking
+  even when every event-listener-level check passes.
+- Per-seed ranked list bar width uses `weight / maxWeight` within that seed (not a global
+  max across all seeds), so the top channel in any given seed always fills the full bar
+  width, matching "channels are ordered and sized by their weighted score **within that
+  one seed**" (SPEC.md).
+- Verified live against the real database: selecting seed `JEPqrqNqkHw` in per-seed mode
+  reproduces the user's spot-check exactly - Numberphile, weight 4.72, ×23 credits.

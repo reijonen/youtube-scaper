@@ -6,7 +6,13 @@
 	import type { default as FA2Layout } from 'graphology-layout-forceatlas2/worker';
 	import type { ChannelGraph } from '$lib/server/queries/channelGraph';
 
-	let { data }: { data: ChannelGraph } = $props();
+	let {
+		data,
+		onHover
+	}: {
+		data: ChannelGraph;
+		onHover?: (channelId: string | undefined, x?: number, y?: number) => void;
+	} = $props();
 
 	let container: HTMLDivElement | undefined = $state();
 	let sigmaInstance: Sigma | undefined;
@@ -47,8 +53,20 @@
 		return MIN_CHANNEL_SIZE + Math.sqrt(totalWeight) * CHANNEL_SIZE_SCALE;
 	}
 
-	function buildGraph(): Graph {
-		const graph = new Graph();
+	interface NodeAttributes {
+		label: string;
+		size: number;
+		color: string;
+		type?: string;
+		image?: string;
+		entityKind: 'seed' | 'channel';
+		entityId: string;
+		x: number;
+		y: number;
+	}
+
+	function buildGraph(): Graph<NodeAttributes> {
+		const graph = new Graph<NodeAttributes>();
 
 		for (const node of data.nodes) {
 			if (node.kind === 'seed') {
@@ -56,6 +74,8 @@
 					label: node.id,
 					size: SEED_SIZE,
 					color: SEED_COLOR,
+					entityKind: 'seed',
+					entityId: node.id,
 					x: Math.random(),
 					y: Math.random()
 				});
@@ -66,6 +86,8 @@
 					color: fallbackColor(node.label),
 					type: 'image',
 					image: '/avatars/' + node.id,
+					entityKind: 'channel',
+					entityId: node.id,
 					x: Math.random(),
 					y: Math.random()
 				});
@@ -130,6 +152,17 @@
 			layoutTimer = setTimeout(() => {
 				layout?.stop();
 			}, 4000);
+
+			sigmaInstance.on('enterNode', ({ node, event }) => {
+				const attrs = graph.getNodeAttributes(node) as NodeAttributes;
+				if (attrs.entityKind === 'channel') {
+					const original = event.original as MouseEvent;
+					onHover?.(attrs.entityId, original.clientX, original.clientY);
+				}
+			});
+			sigmaInstance.on('leaveNode', () => {
+				onHover?.(undefined);
+			});
 		});
 	});
 
