@@ -10,6 +10,8 @@ DATA_DIR_TEMPLATE = PROJECT_ROOT / "data-dir-template"
 EXTENSION_DIR = PROJECT_ROOT / "extension"
 CONTROLLER_SOCKET = PROJECT_ROOT / "run" / "controller.sock"
 DATABASE_PATH = PROJECT_ROOT / "data" / "db.sqlite3"
+DATABASE_WRITER_LOCK_PATH = PROJECT_ROOT / "data" / "db.sqlite3.lock"
+RAW_PAYLOAD_DIR = PROJECT_ROOT / "data" / "raw"
 NATIVE_HOST_WRAPPER = PROJECT_ROOT / "bin" / "scraper-native-host"
 NATIVE_HOST_MANIFEST_NAME = "com.sor.yts"
 
