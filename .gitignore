@@ -39,3 +39,12 @@ extension/node_modules/
 
 # OS
 .DS_Store
+
+# web-ui (SvelteKit project, self-contained; see web-ui/SPEC.md)
+web-ui/node_modules/
+web-ui/.svelte-kit/
+web-ui/avatar-cache/
+web-ui/.env
+web-ui/.env.*
+!web-ui/.env.example
+web-ui/.vscode
