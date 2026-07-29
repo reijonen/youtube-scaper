@@ -1,6 +1,6 @@
 # Implementation decisions
 
-`SPEC-V3.md` and `PLAN.md` are the authority on what to build. This file logs
+`SPEC.md` and `PROTOCOL.md` are the authority on what to build. This file logs
 places where implementation required filling a gap they leave open, or a
 judgment call among reasonable options — so those choices are visible in one
 place instead of only scattered across module docstrings, and so they aren't
@@ -8,7 +8,24 @@ silently re-litigated later without noticing they were deliberate.
 
 Each entry links to where the reasoning lives in full.
 
-## Phase 1 — Payload parser
+**This file is append-only.** Add entries; never edit or delete existing ones. A decision
+stays true even after it is superseded — supersede by appending, not by rewriting.
+
+**Historical vocabulary.** Entries below were written during the original phased build and
+still use its names. Translate as you read:
+
+- **"SPEC-V3"** is now `SPEC.md`. Where an entry cites a protocol section of it — message
+  framing, message types, protocol invariants, error codes — that content now lives in
+  `PROTOCOL.md`.
+- **`PLAN.md`** was the build plan. It burned down completely and was deleted; its durable
+  content moved into `SPEC.md`, this file, and `BACKLOG.md`.
+- **`gates/`** was a throwaway probe harness, since removed. Its four captures now live in
+  `tests/captures/`, its golden profile at `data-dir-template/`, and the real extension
+  signing key at `keys/` (never the probe's).
+- **"Phase N"** referred to that plan's build order. Sections here are keyed by subject
+  instead, since the phase numbering no longer resolves to anything.
+
+## Payload parser
 
 **Recommendation position assignment lives in the accumulator, never in
 `extract_recommendations`.** PLAN.md splits the two deliverables and states
@@ -31,7 +48,7 @@ nulling it out.
 → Consequence for Phase 2: recommendations needed a join table
   (`recommendation_channels`), not a single `channel_id` column.
 
-## Phase 2 — Storage
+## Storage
 
 **Recommendations and comments are deduplicated by `(video_id,
 recommended_video_id)` / `(video_id, comment_id)`, not scoped by `run_id`.**
@@ -52,7 +69,7 @@ criterion 16 (no video stuck running after a crash) true structurally,
 rather than by cleanup logic that has to run correctly on every startup.
 → `src/scraper/storage/schema.sql`, comment above the `videos` table.
 
-## Phase 3 — Protocol and controller socket
+## Protocol and controller socket
 
 **Socket framing byte order: big-endian (network byte order), not "native
 byte order."** SPEC-V3 pins native byte order specifically for Chrome's
@@ -96,7 +113,7 @@ the run with a clear error rather than degrading" in the absence of a
 defined message to carry that error.
 → `src/scraper/controller/connection.py`, `handle_connection`.
 
-## Phase 4 — Native host bridge
+## Native host bridge
 
 **The bridge's `controller_unavailable` notification has no SPEC-V3-defined
 wire shape.** SPEC-V3 names the behaviour ("the bridge reports a structured
@@ -119,7 +136,7 @@ stdin EOF as the sole shutdown signal. Left undone rather than adding a
 fragile workaround for a scenario outside PLAN.md's Phase 4 exit criteria.
 → `src/scraper/native_host.py`, `Bridge.run`.
 
-## Phase 5 — Chrome lifecycle
+## Chrome lifecycle
 
 **`EXTENSION_ID` is a 32-character placeholder in `config.py`, not the real
 extension ID.** SPEC-V3's "Extension identity" derives the real ID from the
@@ -173,7 +190,7 @@ connected, `HandshakeTimeout` fired at the configured deadline, and Chrome
 exited cleanly (code 0) with `data-dir` removed.
 → Manual run, not committed to the repo.
 
-## Phase 6 — Extension
+## Extension
 
 **The recommendation cap is enforced by the controller, not the extension,
 via a mid-video `stop`.** Confirmed with the user before implementing (two
@@ -283,9 +300,9 @@ verified against that real template using a real `ChromeSession` and a real
 `ControllerServer`, not a fake one.
 → Manual run, not committed to the repo.
 
-## Phase 7 — Integration
+## Live-run bugs found during integration
 
-Phase 7's own scope (wiring `python -m scraper controller` to the pieces every
+Integration's own scope (wiring `python -m scraper controller` to the pieces every
 earlier phase built) was small. Most of this phase turned out to be real bugs
 in the extension that only manifest against live Chrome and live YouTube
 traffic — timing, service-worker restarts, real redirects — none of which the
@@ -493,6 +510,36 @@ automated test or a live-run observation made during this phase:
 | 20 | Re-running a completed ID skips it, prints which | `test_runner.py::test_rerun_skips_completed_video`; live-verified (`skipping already-completed video IDs: ...` actually printed in a real run) |
 | 21 | Payload interpretation tested against saved fixtures | `tests/parser/*.py`, all parametrised over `tests/captures/*.json` |
 
+## Carried over from the deleted build plan
+
+These were gotchas in `PLAN.md` rather than decisions, and `SPEC.md` does not state them
+anywhere. Recorded here so deleting that plan loses nothing. All still true.
+
+**`metadataRows` is not positionally stable.** Most sidebar items carry two rows, some
+carry three. Read rows by their content, never by fixed index.
+
+**Ignore `initialDataFinal` in the capture fixtures.** It exists only to prove the snapshot
+worked. Parsing it double-counts everything. It has no production equivalent — in a real
+run the parser receives `initialData`, `playerResponse`, and each `/next` body as separate
+payloads, which is why the parser handles one payload at a time with no knowledge of the
+others and lets the caller accumulate.
+
+**Filter to `LOCKUP_CONTENT_TYPE_VIDEO`, but keep `raw_position` reflecting the pre-filter
+index** so gaps stay visible. No non-video entry appears in any of the four captures, so
+this path is untested in practice.
+
+**In-use detection reads the `SingletonLock` symlink**, whose target encodes a PID, and
+checks whether that process is alive. Avoid `lsof +D` — it descends recursively and is slow
+on a populated profile.
+
+**The profile copy benchmarks `/usr/bin/ditto` against `cp -Rc`** (APFS clone) and uses
+whichever is faster, cached per template path for the process lifetime.
+
+**Nothing may ever be written to stdout except protocol frames.** A stray `print()` in the
+native host corrupts the stream and breaks the connection in a way that is miserable to
+debug. `sys.stdout` is redirected at startup to make this structurally impossible rather
+than merely forbidden.
+
 ## Operational notes
 
 Not design decisions, but gotchas discovered the hard way this session that will bite
@@ -515,22 +562,5 @@ reloading only inside a throwaway `data-dir` copy doesn't change the template.
 
 ## Open investigations
 
-Not blocking anything today, but known-unexplained and worth revisiting.
-
-**`duration_text` and `animated_preview_sources_json` are empty on every recommendation.**
-As of 2026-07-29, all 355 stored recommendations have an empty `duration_text` and an
-empty `animated_preview_sources_json` (`[]`), across all four seed videos that produced
-recommendations. Every other recommendation field populates normally — `title` is 355/355
-and `view_count_text` is 338/355 — so this is not a general extraction failure but
-something specific to these two fields.
-
-Both are parsed in Phase 1 (`RawRecommendation.duration_text`,
-`RawRecommendation.animated_preview_sources`), so the fields exist end to end and the
-columns are being written; they are simply always empty. That points at the extraction
-step rather than storage. Two candidates worth checking first: the lockup shapes these
-values are read from may have moved in YouTube's payload, or they may only be present in
-payloads captured under conditions the current run does not produce (for example, hover
-state for animated previews).
-
-No user-facing impact today — nothing consumes either field. Revisit before anything
-depends on duration or preview data.
+Moved to `BACKLOG.md` — open work does not live in this file. The `duration_text` and
+`animated_preview_sources_json` investigation recorded here is now `BL-012`.

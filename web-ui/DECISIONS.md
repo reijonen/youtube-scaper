@@ -1,10 +1,19 @@
 # web-ui — Decisions
 
 Non-obvious choices and gotchas found during implementation, mirroring the repository
-root's `DECISIONS.md` convention. See [SPEC.md](SPEC.md) and [PLAN.md](PLAN.md) for what
-governs this project.
+root's `DECISIONS.md` convention. See [SPEC.md](SPEC.md) for what governs this project and
+the root `BACKLOG.md` for open work.
 
-## Phase 0 — Scaffolding
+**This file is append-only.** Add entries; never edit or delete existing ones. Supersede by
+appending.
+
+**Historical vocabulary.** Entries below were written during the original phased build.
+`PLAN.md` burned down completely and was deleted — its durable content moved into
+`SPEC.md`, this file, and `BACKLOG.md`. "Phase N" referred to that plan's build order;
+sections here are keyed by subject instead. Where an entry cites a figure or rule from
+`PLAN.md`, the current statement of it is in `SPEC.md`.
+
+## Scaffolding
 
 - Scaffolded with `npx sv create` (the current official SvelteKit CLI, successor to
   `create-svelte`) rather than hand-writing config. Template `minimal`, `--types ts`,
@@ -36,7 +45,7 @@ governs this project.
   markup in `src/routes/+page.svelte`) since it's noise against the real view to be built
   in Phase 3 onward.
 
-## Phase 1 — Read-only data access
+## Read-only data access
 
 - `src/lib/server/db.ts` resolves its default DB path relative to its own file location
   (`import.meta.url`), not `process.cwd()` — four directories up
@@ -55,7 +64,7 @@ governs this project.
   - Verification was done via a throwaway `+server.ts` route hit with `curl`, then deleted;
     it's not part of the committed source.
 
-## Phase 2 — Channel graph query
+## Channel graph query
 
 - **A spec/plan inconsistency was caught and fixed before implementing, not after.**
   PLAN.md's Phase 2 deliverable originally said weighted edges are formed "summed per
@@ -99,7 +108,7 @@ governs this project.
   fresh `:memory:` database per test run, then inserts minimal rows. This keeps the test
   schema from silently drifting out of sync with the scraper's actual schema.
 
-## Phase 3 — View registry
+## View registry
 
 - **Route strategy: one generic dynamic route, `src/routes/[view]/+page.server.ts` +
   `+page.svelte`, not one route folder per view.** SPEC.md says the channel graph's route
@@ -132,7 +141,7 @@ governs this project.
   replace it with the actual Sigma/ranked-list rendering. Its only job here is to prove data
   flows from `getChannelGraph` through the registry to a rendered component.
 
-## Phase 4 — Avatar cache
+## Avatar cache
 
 - Route: `src/routes/avatars/[channelId]/+server.ts` (`GET /avatars/:channelId`).
 - **Cache encodes content-type in the file extension instead of a sidecar metadata file.**
@@ -166,7 +175,7 @@ governs this project.
   (`import.meta.url`, four levels up to `web-ui/`), the same pattern as `db.ts` in Phase 1,
   for the same reason - no assumption about the process's working directory.
 
-## Phase 5 — Total mode
+## Graph rendering
 
 - **SPEC.md's claim that "dashed edges are a built-in Sigma edge type" is false**,
   discovered before writing any rendering code (grepped the installed `sigma@3.0.3`
@@ -240,7 +249,7 @@ governs this project.
 - Added `.claude/launch.json` (`web-ui-dev`, `npm run dev --prefix web-ui`, port 5173) to
   drive the in-app browser preview tool against this project during development/testing.
 
-## Phase 6 — Per-seed mode and interaction
+## Interaction and hover verification
 
 - Mode/seed-selection state (`mode`, `selectedSeedId`) lives in `ChannelsView.svelte`,
   the parent of both `TotalModeGraph` and `PerSeedRanked`, rather than inside either mode
@@ -279,3 +288,62 @@ governs this project.
   one seed**" (SPEC.md).
 - Verified live against the real database: selecting seed `JEPqrqNqkHw` in per-seed mode
   reproduces the user's spot-check exactly - Numberphile, weight 4.72, ×23 credits.
+
+## Graph model — reviewed 2026-07-29
+
+Recorded after the first working build was reviewed against what it was meant to answer.
+
+- **The seed→channel graph is bipartite and therefore cannot answer "who clusters around
+  whom".** Every edge runs seed → channel; no code path emits a channel↔channel edge, and
+  `GraphEdge` cannot express one. Channels have no adjacency to each other, so ForceAtlas2
+  has nothing to cluster them by — what renders is four video hubs with 212 leaves. This
+  was not a rendering bug: the clustering relation was never computed. The original brief
+  ("who is recommended how much in whose videos") was encoded literally as seed→channel and
+  the channel-to-channel graph deferred, which produced a correct implementation of the
+  wrong instrument. Clustering questions now belong to the co-recommendation view
+  (`BL-008`); the bipartite view keeps its own narrower question and is not being deleted.
+
+- **A directed channel→channel graph would not have fixed it either, at today's data.**
+  Swapping the four video nodes for their four owning channels relabels the hubs and
+  changes nothing else — same four hubs, same 212 leaves, still zero adjacency among the
+  leaves. Directed edges only form a network once channels seen as recommendations are
+  themselves scraped and the loop closes. Worth stating explicitly in `SPEC.md` so a future
+  implementer of `BL-007` does not read the expected shape as a failure of their own work.
+
+- **DCG position weight must not be applied to co-recommendation edges.** A directed edge
+  weights an observed event (B sat at slot *k* on A's page — an attention magnitude); a
+  co-recommendation edge weights a statistical association (X and Y are treated as
+  interchangeable). Weighting co-occurrence by position would assert that channels near the
+  top of a sidebar are more *similar* to each other than channels near the bottom, which
+  confuses attention with similarity. If anything the reverse holds: deep slots are where
+  YouTube has exhausted the obvious picks and is reaching into the real topical
+  neighbourhood. The correct instrument is a normalized set-overlap measure, which also
+  fixes the two problems position weighting does not touch — combinatorial inflation
+  (`C(n,2)` edges per sidebar) and popularity conflation.
+
+- **All three similarity measures get built rather than one being chosen.** Jaccard, cosine
+  (Ochiai), and NPMI. NPMI is the measure that actually answers the clustering question
+  because it discounts the null model directly, but it needs N in the hundreds and is
+  meaningless at four seeds; cosine is the stable default meanwhile. Choosing one now and
+  deferring the rest would mean rebuilding when the corpus deepens. Explicit instruction
+  from the repository owner: build the state of the art, don't settle.
+
+- **Self-loops are modelled as a node attribute, not an edge.** `selfShare(A)` is one
+  number per node, so it is naturally a node property; drawn as a loop it would be
+  illegible, inflate PageRank, and distort random walks. The trap worth recording: when
+  row-normalizing, the self-loop must stay **in the denominator** even though its edge is
+  not drawn, so the outward edges sum to less than 1 and the deficit carries the retention
+  signal. Removing the self-loop before normalizing inflates the remaining edges to sum to
+  1 and destroys the signal silently — nothing about the output looks wrong.
+
+- **The per-seed ranked mode is dropped** (`BL-006`). Only one view was wanted initially and
+  per-seed was not it; its question is better served by click-to-trace on a node
+  (`BL-005`). The code still exists at time of writing.
+
+- **Measured co-recommendation shape, before building anything on it:** 7,859 distinct
+  undirected pairs across the four seeds, of which 7,070 (90%) share exactly one seed and
+  are pure within-sidebar filler. Filtering to pairs sharing two or more seeds leaves 789
+  edges over 44 channels — 83% density, still a hairball. At four seeds any channels-only
+  projection is a union of four cliques. This is a fact about corpus depth, not about the
+  measure, and it is why the view is specified to be built correctly rather than tuned
+  against today's shape.

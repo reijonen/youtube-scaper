@@ -3,22 +3,33 @@
 A local, read-only viewer for the scraper's SQLite database. Its purpose is to make the
 collected data legible as structure, not to reproduce it as tables.
 
+This document describes what the web-ui **is**. Open work lives in the repository-root
+`BACKLOG.md`; non-obvious choices already made live in `DECISIONS.md` next to this file.
+
 ## Scope
 
-This document covers `web-ui/` only. Everything in it is decided; there are no open
-items. Work not described here is out of scope for this spec.
+Three graph views over the same data, each answering a different question:
+
+| View | Question | Status |
+|---|---|---|
+| **Seed → channel** | who is recommended how much, and in whose videos | built |
+| **Directed channel → channel** | where does YouTube send a channel's viewers | `BL-007` |
+| **Co-recommendation** | which channels does YouTube treat as substitutes | `BL-008` |
+
+They share the query layer, the avatar cache, and the view registry. They do **not** share
+a weighting model — see *Weighting models*, which is the part of this document most likely
+to be got wrong.
 
 ## Preconditions
 
-None. The view specified here depends on no normalized column — its weights derive from
-`raw_position` and row counts, both already stored as integers, and its labels from text
+None. No view specified here depends on a normalized column — weights derive from
+`raw_position` and row counts, both already stored as integers, and labels from text
 columns consumed as-is.
 
-Several columns in the database hold numbers rendered as display text (`view_count_text`
-of `"274K"`, `published_text` of `"1 year ago"`). Normalizing those is the scraper's
-responsibility, not the web-ui's, and it is deferred until a view actually requires it.
-The web-ui never parses, coerces, or repairs values it reads — it consumes columns as
-stored. A view that needs a real number waits for the scraper to provide one.
+Several columns hold numbers rendered as display text (`view_count_text` of `"274K"`,
+`published_text` of `"1 year ago"`). Normalizing those is the scraper's responsibility, not
+the web-ui's, and is deferred until a view requires it (`BL-013`). The web-ui never parses,
+coerces, or repairs values it reads — it consumes columns as stored.
 
 ## Stack
 
@@ -32,50 +43,45 @@ stored. A view that needs a real number waits for the scraper to provide one.
 | Charting library | None |
 | Runtime | Dev server only — `npm run dev` |
 
-There is no production build target and no deployment. The application is run locally by
-its author.
+There is no production build target and no deployment. The application is run locally.
 
-Sigma is a WebGL renderer built on graphology, and it is chosen deliberately over an
-SVG-based approach rather than as a concession to current data size. The corpus is
-intended to grow; building the layout on SVG now would mean rebuilding it later, and the
-renderer is not the part of this application worth doing twice. graphology also carries the
-analytical satellite libraries (metrics, community detection) that later views will want,
-so the graph model is not a dead end.
+Sigma is chosen deliberately over an SVG approach rather than as a concession to current
+data size. The corpus is intended to grow; building the layout on SVG now would mean
+rebuilding it later. graphology also carries the analytical satellite libraries (metrics,
+community detection) that the co-recommendation view will want, so the graph model is not a
+dead end.
 
-One capability the specified view needs is native to this stack rather than custom work:
-image-filled nodes, provided by `@sigma/node-image`. ForceAtlas2 runs in a web worker, so
-layout iteration never blocks the UI.
+Two known limits shape the design:
 
-Sigma has no built-in dashed edge type — this was checked directly against the installed
-`sigma` 3.0.3 source, its changelog, and the npm registry before committing to it, and no
-such capability or companion package exists. Achieving an actual dash pattern would mean
-a hand-written WebGL edge shader, which is out of proportion to what collaborator edges
-need to communicate. Collaborator edges are instead distinguished from weighted edges by
-color and reduced opacity alone, both already part of this spec's intent, using Sigma's
-default (solid) edge program.
+- **Sigma has no built-in dashed edge type.** Verified against the installed `sigma` 3.0.3
+  source, its changelog, and the npm registry. Achieving a real dash pattern would mean a
+  hand-written WebGL edge shader. Edges that need to read as secondary are distinguished by
+  **color and reduced opacity only**, using the default solid edge program.
+- **Sigma degrades when every node carries an image**, well before it degrades on node
+  count alone. Avatar-image nodes render only while the visible node count is small enough
+  to afford them, falling back to plain colored circles beyond a threshold via a node
+  reducer. The fallback is a rendering concern only — it changes no data and no weighting.
 
-One known limit shapes the design: Sigma renders very large graphs comfortably with default
-styles but degrades well before that when every node carries an image. The view therefore
-renders avatar-image nodes only while the visible node count is small enough to afford
-them, and falls back to plain colored circles beyond that threshold, via a Sigma node
-reducer. The fallback is a rendering concern only — it changes no data and no weighting.
-
-Queries return renderer-agnostic `{nodes, edges}` structures regardless, so the query layer
-is never coupled to Sigma.
-
-No charting library is added until a view requires one. The channel graph does not.
+Queries return renderer-agnostic `{nodes, edges}` structures, so the query layer is never
+coupled to Sigma. No charting library is added until a view requires one.
 
 ## Data access
 
-The database path is read from an environment variable with a relative default, so the
-web-ui makes no assumption about its own position in the directory tree.
+The database path comes from `SCRAPER_DB_PATH`, defaulting to a path resolved relative to
+the module's own location (not `process.cwd()`), so the web-ui makes no assumption about
+where it sits in the tree or where `npm run dev` was invoked from.
 
-The connection is opened **read-only**. The web-ui never writes to the database, never
-migrates it, and never creates it. The database is in WAL mode, so read-only access is
-safe while the scraper is running.
+The connection is opened **read-only**, with `fileMustExist: true`. The web-ui never
+writes to the database, never migrates it, and never creates it. The database is in WAL
+mode, so read-only access is safe while the scraper is running. Do not take locks and do
+not assume exclusive access.
 
-Read-only refers to the database. The web-ui does write one thing to disk: a local avatar
-image cache, described under *Avatar cache* below. It writes nothing else.
+`fileMustExist` is not optional: without it `better-sqlite3` silently creates an empty
+database at a mistyped path, and every view then renders an empty graph that looks like a
+data problem rather than a configuration one.
+
+Read-only refers to the database. The web-ui writes exactly one thing to disk: the avatar
+cache described below.
 
 ### Table boundary
 
@@ -85,17 +91,16 @@ The web-ui reads only content tables:
 - `recommendation_channels`
 - `comments`
 
-It never reads pipeline tables — `runs`, `videos`, `raw_payloads`, `received_batches` —
-except for `videos.video_id` and `videos.status`, which identify which videos are seeds.
-This boundary is the reason the database is not split into separate files: separation is
-enforced at the query layer instead. Splitting was rejected on two grounds. The database
-is in WAL mode, under which SQLite's cross-database transactions are atomic per file but
-not across the set, which would weaken the scraper's crash-safety guarantees. And the
-scraper enforces foreign keys (`PRAGMA foreign_keys = ON`, a documented Phase 2
-deliverable), which SQLite cannot apply across attached databases.
+It never reads pipeline tables — `runs`, `raw_payloads`, `received_batches` — and from
+`videos` reads only `video_id` and `status`, which identify which videos are seeds.
 
-`data/raw/` is not read. Raw payloads are cold recovery, not a data source for this
-application.
+This boundary is why the database is not split into separate files: separation is enforced
+at the query layer instead. Splitting was rejected on two grounds. The database is in WAL
+mode, under which SQLite's cross-database transactions are atomic per file but not across
+the set, weakening the scraper's crash-safety guarantees. And the scraper enforces foreign
+keys (`PRAGMA foreign_keys = ON`), which SQLite cannot apply across attached databases.
+
+`data/raw/` is not read. Raw payloads are cold recovery, not a data source.
 
 ### run_id
 
@@ -106,33 +111,22 @@ labels by run.
 
 ## Repository boundary
 
-The web-ui is a self-contained project inside an existing repository. The boundary is
-strict in both directions.
+The web-ui is a self-contained project inside a larger repository.
 
-**Owned by this project — created and modified freely:**
+**Owned by this project — create and modify freely:** everything under `web-ui/`, plus
+`web-ui/` entries in the repository `.gitignore`.
 
-- Everything under `web-ui/`, including its `SPEC.md`, `PLAN.md`, and `DECISIONS.md`
-- `web-ui/`-related entries appended to the repository `.gitignore`
+**Shared with the repository:** the root `CLAUDE.md` (conventions and standing
+instructions) and `BACKLOG.md` (open work for both subjects). Read and write both.
 
-**Readable, never modified:**
+**Read, never modify:** `src/scraper/storage/schema.sql` — the authoritative schema — and
+`data/db.sqlite3`, opened read-only.
 
-- `src/scraper/storage/schema.sql` — the authoritative schema
-- `data/db.sqlite3` — opened read-only
-
-**Out of bounds — neither read as guidance nor modified:**
-
-- The repository-root `SPEC.md`-equivalent documents: `SPEC-V3.md`, `PLAN.md`,
-  `DECISIONS.md`, `README.md`. These describe the scraper's design and implementation
-  history. They do not govern the web-ui, and following them here would be a mistake.
-- `src/scraper/` (other than `schema.sql`), `extension/`, `tests/`, `bin/`, `keys/`,
-  `data-dir-template/`, `data/raw/`, `run/`, `.venv/`
-
-`web-ui/SPEC.md` and `web-ui/PLAN.md` are the governing documents for this work.
-`web-ui/DECISIONS.md` records non-obvious choices and gotchas found during implementation,
-mirroring the convention the repository root uses for the scraper.
-
-Every convention the web-ui needs is stated in its own documents. No file outside
-`web-ui/` needs to be consulted to build it, apart from reading the schema.
+**Not guidance for this project:** the root `SPEC.md`, `PROTOCOL.md`, and `DECISIONS.md`
+describe the scraper and its extension. They are readable, but they do not govern the
+web-ui and applying their rules here would be a mistake. Likewise leave alone
+`src/scraper/` (apart from the schema), `extension/`, `tests/`, `bin/`, `keys/`,
+`data-dir-template/`, `data/raw/`, `run/`, and `.venv/`.
 
 ## Architecture
 
@@ -142,164 +136,331 @@ Each visualization is a self-contained folder under `src/lib/views/`, exporting 
 { id, title, question, load, component }
 ```
 
-Views are discovered automatically and populate the navigation. Adding a visualization
-means adding one folder — no routing changes, no registry edits.
+Views are discovered automatically via `import.meta.glob` and populate the navigation.
+Adding a visualization means adding one folder — no routing changes, no registry edits. A
+single generic `src/routes/[view]/` route matches on the manifest `id`.
 
 Query functions live in `src/lib/server/queries/` and return renderer-agnostic data
 structures. Rendering decisions belong to components, not queries.
 
+`load` must wrap its query import in a **dynamic** `import()`. The registry is eagerly
+globbed from `+layout.svelte`, which is client code, and SvelteKit's server-only-import
+guard fires on a static import of anything under `$lib/server`. Type-only imports are
+erased and are safe.
+
 ### Testing
 
-Query functions are tested; components are not. The weighting arithmetic, the
-position-0 filtering, and the per-seed grouping are the parts that can be silently wrong
-while looking plausible, and they all live in the query layer. Rendering errors are
-visible on screen and need no test to catch.
+Query functions are tested; components are not. The weighting arithmetic, the position
+filtering, and the per-seed grouping are the parts that can be silently wrong while looking
+plausible, and they all live in the query layer. Rendering errors are visible on screen.
 
-Tests run against a small fixture database built in the test setup, never against
-`data/db.sqlite3`.
+Tests run against a small fixture database built in test setup — never against
+`data/db.sqlite3`. The fixture builder applies `src/scraper/storage/schema.sql` verbatim to
+a fresh `:memory:` database, so the test schema cannot drift from the scraper's.
+
+Query functions take their connection as a required parameter rather than defaulting to the
+app singleton: importing `db.ts` opens the real database as an import side effect, which
+would make even fixture-based tests touch it.
 
 ### Source resolution
 
-The "source" side of a graph edge is resolved through a single function that maps a seed
-video to its graph node. Today it resolves a seed video to itself. A future
-channel-to-channel view replaces this one function using a video-to-channel mapping held
-outside this database. No schema column is added for this, and no other code changes when
-it lands.
+The "source" side of a graph edge is resolved through a single function mapping a seed
+video to its graph node. Today it resolves a seed video to itself. The directed view
+replaces this one function using a video-to-channel mapping held outside this database
+(`BL-009`). No schema column is added for this.
 
 ## Avatar cache
 
-Channel avatars are remote YouTube CDN URLs stored in
-`recommendation_channels.avatar_sources_json`. Every channel has exactly one source, at
-68×68. Rendering the graph directly against those URLs would issue one request to Google
-per channel on every render, so avatars are fetched once and cached on disk.
+Channel avatars are remote YouTube CDN URLs in
+`recommendation_channels.avatar_sources_json`. Rendering directly against those URLs would
+issue one request to Google per channel on every render, so avatars are fetched once and
+cached on disk.
 
-A server route serves an avatar by `channel_id`. On a cache hit it streams the stored
-file. On a miss it fetches the URL recorded for that channel, writes it to the cache, and
-streams it. The client references the route and never touches a CDN URL, so the number of
-outbound requests is bounded by the number of channels, once.
+A server route serves an avatar by `channel_id`. On a hit it streams the stored file; on a
+miss it fetches the recorded URL, writes it to the cache, and streams it. The client
+references the route and never touches a CDN URL, so outbound requests are bounded by the
+number of channels, once.
 
-The cache lives in a directory under `web-ui/`, excluded from version control. It is
-disposable: deleting it costs one refetch and nothing else. It is the only thing the
-web-ui writes.
+The cache lives under `web-ui/`, excluded from version control, and is disposable —
+deleting it costs one refetch.
 
-A `channel_id` arriving at the route is validated against a strict identifier pattern
-before it is used to build a filesystem path. A fetch failure is not cached, and renders
-as the same fallback used when a channel has no usable avatar: a colored circle bearing
-the channel's first initial.
+- **A `channel_id` arriving at the route is validated against a strict identifier pattern
+  before it is used to build a filesystem path.** It comes from the URL; unvalidated, it is
+  a path traversal.
+- **Failures are never cached.** A transient network error must not become a permanently
+  broken avatar that only a manual cache wipe fixes.
+- Every channel has exactly one avatar source, at 68×68, but **36 of 378 source records
+  carry no `width` field**. Read the URL; do not require the dimensions.
+- The fallback, used when a channel has no usable avatar or the fetch fails, is a colored
+  circle bearing the channel's first initial, its hue derived deterministically from the
+  display label.
 
-## View: Channel graph
+## Weighting models
 
-Route: `/channels`. One route, two modes, one toggle.
+The three views measure different things and **must not share a weighting scheme**. A
+directed edge weights an observed event; a co-recommendation edge weights a statistical
+association. One is a sum over observations, the other a ratio against a null model.
 
-The question it answers: **who is recommended how much, and in whose videos.**
+### Position weight (DCG)
 
-### Weighting model
-
-A recommendation credits its channels in `recommendation_channels.position` order.
-Position 0 is the main channel; positions above 0 are collaborators.
-
-**Only the position-0 channel carries weight.** Collaborators are rendered but score zero.
-This matches where views and watch time actually accrue on a collaboration upload, keeps
-total credits equal to the number of real sidebar slots, and prevents a channel network
-from multiplying its apparent reach by crediting many channels on a single slot.
-
-Weight uses `raw_position` — true on-screen placement, including the playlist and mix
-blocks that were filtered out of `normalised_position`. Those blocks occupied real screen
-space and pushed later entries down, so `raw_position` is the faithful attention proxy.
-
-For a channel `c` and seed video `s`:
+Wherever position matters, the discount is:
 
 ```
-weight(c, s) = Σ  1 / log₂(1 + raw_position(r))
+1 / log₂(1 + raw_position)
 ```
 
-over every recommendation `r` in seed `s` whose position-0 channel is `c`.
+Slot 1 scores 1.00, slot 2 scores 0.63, slot 10 scores 0.29, slot 100 scores 0.15 — steep
+enough to express position bias, gentle enough that entries below the fold stay visible.
 
-This is the standard DCG discount: slot 1 scores 1.00, slot 2 scores 0.63, slot 10 scores
-0.29, slot 100 scores 0.15. It is steep enough to express position bias and gentle enough
-that entries below the fold remain visible.
+Weight uses `raw_position`, not `normalised_position`: the playlist and mix blocks filtered
+out of the normalised value occupied real screen space and pushed later entries down, so
+the raw value is the faithful attention proxy. `raw_position` is 1-based, so `log₂(1 + p)`
+is safe — but it is one bad row away from dividing by zero. **Assert `raw_position >= 1`
+rather than trusting it.**
 
-**One edge per `(seed, channel)` pair.** The sum above is the edge's weight, and the number
-of recommendations contributing to it is that edge's credit count. A seed that recommends
-the same channel several times yields one edge carrying the combined weight, never parallel
-edges.
+### Channel credit within a recommendation
 
-**A pair with any position-0 credit is a weighted edge, never a collaborator edge.** A
-channel can be the main channel on one recommendation and a collaborator on another within
-the same seed. Such a pair is drawn once, as a weighted edge; its collaborator appearances
-add nothing to the weight and produce no second edge. A reduced-opacity collaborator edge
-exists only for a pair with no position-0 credit anywhere in that seed.
+A recommendation credits its channels in `recommendation_channels.position` order. Position
+0 is the main channel; positions above 0 are collaborators.
+
+**Only the position-0 channel carries weight.** This matches where views and watch time
+actually accrue on a collaboration upload, keeps total credits equal to the number of real
+sidebar slots, and prevents a channel network from multiplying its apparent reach by
+crediting many channels on a single slot. Collaborators are rendered but score zero.
 
 **The unweighted credit count is always displayed alongside the weighted score, never
 instead of it.** A score whose derivation is invisible is not interpretable.
 
-### Total mode
+### Directed edges (A → B)
 
-A force-directed bipartite graph, rendered by Sigma with ForceAtlas2 layout.
+An edge asserts *YouTube routes A's viewers toward B*. Asymmetric by nature.
 
-- **Nodes:** seed videos, plus every channel appearing in any seed's sidebar. Against
-  current data that is 212 channel nodes — 197 carrying weight, 15 appearing only as
-  collaborators.
+The DCG weight transfers directly, but raw sums introduce a sampling artifact the
+seed→channel view never had: **A's out-weight scales with how many of A's videos were
+scraped.** Ten Numberphile seeds and one Veritasium seed gives Numberphile ten times the
+raw out-weight — a fact about the scraping, not about YouTube. So normalize per source:
+
+```
+w(A→B) = (1 / |V_A|) · Σ         Σ                 1 / log₂(1 + raw_position(r))
+                        v ∈ V_A   r ∈ sidebar(v)
+                                  owner(r) = B
+```
+
+where `V_A` is the set of A's scraped videos. The edge then reads as *"on a typical A
+video, B captures this much discounted sidebar attention"* — comparable across channels
+sampled at different depths.
+
+**Two normalizations, both available, switchable:**
+
+- **Absolute** (the formula above) — preserves magnitude. Answers "how much".
+- **Row-stochastic** — A's out-edges sum to 1, making the graph a transition matrix and
+  legitimizing PageRank and random-walk analysis. Answers "where does a walker end up".
+  Destroys magnitude, so it does not replace absolute.
+
+Out-degree is a fact about the scraping; in-degree is a fact about YouTube. Channels seen
+only as recommendations are structural leaves with zero out-degree because they were never
+scraped, not because they recommend nobody. This asymmetry recedes as the frontier closes
+but never fully disappears — say so in the UI rather than letting it read as a finding.
+
+### Co-recommendation edges (X — Y)
+
+An edge asserts *YouTube treats X and Y as interchangeable for the same viewer*. Symmetric
+by nature: sharing a sidebar has no direction.
+
+**Do not weight these by DCG.** Position measures attention, not similarity; weighting
+co-occurrence by position would assert that channels near the top of a sidebar are more
+alike than channels near the bottom, which is a category error. If anything the reverse
+holds — deep slots are where YouTube has exhausted the obvious picks and is reaching into
+the genuine topical neighbourhood.
+
+The real problems here are different, and neither is solved by position weighting:
+
+- **Combinatorial inflation.** A sidebar of *n* channels manufactures `C(n,2)` edges. Raw
+  counts let the fattest sidebars write the graph.
+- **Popularity conflation.** A channel in every sidebar co-occurs with everything. Raw
+  co-occurrence cannot separate "similar to X" from "popular".
+
+Both are addressed by measuring association over **seed-membership sets**. Let `S_X` be the
+set of seeds in which X is recommended and `N` the seed count:
+
+| Measure | Formula | Character |
+|---|---|---|
+| Jaccard | `\|S_X ∩ S_Y\| / \|S_X ∪ S_Y\|` | simple; harsh on rare channels |
+| Cosine (Ochiai) | `\|S_X ∩ S_Y\| / √(\|S_X\|·\|S_Y\|)` | collaborative-filtering standard; stable |
+| NPMI | `PMI / -log p(X,Y)`, `PMI = log( p(X,Y) / (p(X)·p(Y)) )` | discounts the null model directly; noisy at low N; bounded to [-1, 1] |
+
+**Implement all three and make them switchable.** NPMI is the measure that actually answers
+the clustering question, because it explicitly asks whether a pair co-occurs more than
+popularity alone explains — but it needs N in the hundreds to behave, and is meaningless at
+today's N. Cosine is the sane default until the corpus is deep. Picking one now and
+deferring the others would mean rebuilding this when the data arrives.
+
+All three are bounded, which is what makes a linear filter slider usable — see `BL-003`.
+
+### Self-loops
+
+A self-loop is A recommending its own other videos. It is real signal — YouTube's
+in-channel retention behaviour — and it is already known to occur: three of the current
+seed videos are identifiable as Numberphile *only* because they appear in each other's
+sidebars.
+
+**Model it as a node attribute, not an edge:**
+
+```
+selfShare(A) = w(A→A) / Σ  w(A→B)      over all B including A
+```
+
+The fraction of A's discounted sidebar attention that stays inside A. Excluded from the
+edge set, encoded as a visual attribute (node ring, border weight, or fill saturation). It
+is one number per node, so it is naturally a node property; drawn as a loop it would be
+illegible, inflate PageRank, and distort random walks for no gain.
+
+**The denominator rule, which is easy to get backwards and looks correct when wrong:** when
+row-normalizing, the self-loop stays **in** the denominator even though its edge is not
+drawn. Outward edges then sum to less than 1, and the deficit *is* the self-share — "40%
+stays home, 60% leaves". Dropping the self-loop before normalizing inflates the outward
+edges to sum to 1 and annihilates the retention signal, making a channel that retains 60%
+of its attention indistinguishable from one that retains none.
+
+What it licenses:
+
+| Reading | Interpretation |
+|---|---|
+| High self-share | walled garden — YouTube treats the catalog as self-sufficient |
+| Low self-share | gateway — viewers get dispersed outward |
+| High in-degree + high self-share | dominant hub that also hoards |
+| High in-degree + low self-share | distributor — receives attention and passes it on |
+
+Self-share also predicts whether chain-scraping from a seed will explore or stall, which is
+an independent read on `BL-011`.
+
+Co-recommendation has no self-loop — X—X is meaningless. The analogous quantity is a
+channel appearing several times in one sidebar, which is a multiplicity already captured as
+the credit count.
+
+## Views
+
+### Seed → channel (built)
+
+Route `/channels`. A force-directed bipartite graph rendered by Sigma with ForceAtlas2
+layout in a web worker. ForceAtlas2 must run in its worker — on the main thread the UI
+freezes during layout.
+
+- **Nodes:** seed videos, plus every channel appearing in any seed's sidebar.
 - **Seed nodes:** every video with `status = 'completed'`, including any that produced no
   recommendations. Such a video renders as an isolated node, visibly distinct from a video
-  that was never collected. This is deliberate: YouTube does not realistically serve a
-  watch page with zero recommendations, so an isolated seed is a signal that the video
-  should be collected again. Against current data no video is in this state — the two
-  videos with no recommendations both have `status = 'failed'` and are therefore not seeds.
-- **Node size:** a channel's total weighted score summed across all seeds. Channels with
-  zero weight render at a fixed minimum size so they remain visible and hoverable.
-- **Node fill:** the channel's avatar, served from the avatar cache, subject to the
-  image-node threshold described under *Stack*.
-- **Edges:** seed video → channel, one per pair, weighted by `weight(c, s)`. Against
-  current data, 263 weighted edges carrying 355 credits between them.
+  never collected — deliberately, since YouTube does not realistically serve a watch page
+  with zero recommendations, so an isolated seed signals the video should be collected
+  again.
+- **Node size:** a channel's total weighted score summed across all seeds. Zero-weight
+  channels render at a fixed minimum size so they stay visible and hoverable.
+- **Node fill:** the channel's avatar, subject to the image-node threshold.
+- **Edges:** **one edge per `(seed, channel)` pair**, never one per recommendation. The
+  edge's weight is the DCG sum across every recommendation in that seed whose position-0
+  channel is that channel; its credit count is the number of contributing recommendations.
+- **Collaborator edges:** pairs credited only at `position > 0`, weight zero, rendered in a
+  distinct color at reduced opacity.
+- **A pair with any position-0 credit is a weighted edge, never a collaborator edge.** A
+  channel can be the main channel on one recommendation and a collaborator on another
+  within the same seed. Compute the weighted pair set first, then emit collaborator edges
+  only for pairs not already in it. Getting this wrong yields parallel solid-and-faint edges
+  between the same two nodes.
+- **Channel label:** `handle`, falling back to `name`. Identity is `channel_id`. Graph node
+  keys are prefixed (`seed:` / `channel:`) so a video id and a channel id can never collide
+  into one node.
+- **Interaction:** hovering a channel shows its per-seed breakdown — weighted score and
+  unweighted credit count for each seed it appears in.
 
-The layout carries the finding: channels recommended across multiple seeds are pulled
-toward the centre, channels appearing in a single seed settle on the fringe.
+**This view is not a clustering instrument.** It is bipartite: channels have no adjacency
+to each other, so a force layout has nothing to cluster them by. What it does show is that
+channels recommended across multiple seeds are pulled toward the centre while single-seed
+channels settle on the fringe. Questions about who clusters with whom belong to the
+co-recommendation view.
 
-### Per-seed mode
+### Directed channel → channel (`BL-007`)
 
-A ranked layout, not a force layout. A single seed's graph is a star — one hub with every
-edge topologically identical — and a force layout of a star communicates nothing.
+Nodes are channels only; no video nodes. A→B when a video owned by A recommends a video
+owned by B. Weighting and self-loop handling as specified above. Requires the seed→owner
+mapping (`BL-009`).
 
-Channels are ordered and sized by their weighted score within that one seed, with avatars
-and labels visible, answering which channels dominate that specific sidebar.
+Note before building: at today's four seeds this view is **topologically identical to the
+seed→channel view** — four hubs and their leaves, with the hubs relabelled from video ids to
+channel names. It becomes a network only once channels seen as recommendations are
+themselves scraped and the loop closes. That is expected, not a failure of the
+implementation.
 
-This mode does not use Sigma. A ranked list is a layout problem, not a graph-rendering
-one, and is drawn directly in the component. Both modes read the same query output.
+### Co-recommendation (`BL-008`)
 
-### Collaborator rendering
+Nodes are channels only. X—Y when both appear in the same seed's sidebar. Buildable from
+the database today with no external data. Community detection over this graph is the direct
+answer to which channels cluster together.
 
-Channels at position above 0 appear as nodes connected by edges in a **distinct color, at
-reduced opacity**, carrying zero weight — except where that same `(seed, channel)` pair
-also has a position-0 credit, in which case the weighted edge stands alone and no
-collaborator edge is drawn. Against current data that is 18 collaborator edges, from 23
-collaborator credits of which 5 fall on pairs that are already weighted.
+Note before building: at four seeds this is **a union of four cliques**, and 90% of its
+edges are single-seed co-occurrences carrying no information. Filtering to pairs sharing
+two or more seeds leaves 789 edges over 44 channels at 83% density — smaller, still a
+hairball. Meaningful clustering needs a substantially deeper corpus. Build it correctly now
+and it becomes useful as the corpus grows; do not tune it against today's shape.
 
-This keeps two distinct realities visible without conflating them: a channel network
-inflating one slot with many avatars reads as a recognisable faint cluster, while a
-legitimate collaborator that never uploads under its own name still appears in the graph
-rather than vanishing from it.
+## Measured data
 
-### Labels and identity
+Measured 2026-07-29. These are checks on a correct implementation, not targets — the
+database is expected to grow, and these numbers with it. Re-measure rather than assuming.
 
-Channel identity is `channel_id`. The display label is `handle`, falling back to `name`
-when `handle` is absent. No `channel_id` in the current data carries conflicting names or
-handles across rows, so no reconciliation is required.
+| Quantity | Value |
+|---|---|
+| Seed videos (`status = 'completed'`) | 4 |
+| Distinct channel nodes | 212 |
+| Channels carrying weight | 197 |
+| Collaborator-only channels (zero weight) | 15 |
+| Recommendations, each with exactly one position-0 channel | 355 |
+| **Weighted edges** — distinct `(seed, channel)` pairs | **263** |
+| …credited by more than one recommendation | 27 |
+| Collaborator credits (`position > 0`) | 23 |
+| …falling on pairs that already have a position-0 credit | 5 |
+| **Collaborator edges** — pairs, overlap excluded | **18** |
+| Total edges of any kind | 281 |
+| `raw_position` range | 1–146 |
 
-### Interaction
+355 is the number of weighted **credits**; 263 is the number of **edges** those credits
+collapse into. Both are displayed; only 263 are drawn.
 
-Hovering a channel shows its per-seed breakdown: weighted score and unweighted credit
-count for each seed it appears in.
+Sidebar sizes per seed: 73 (`1cvKGqgOx_8`), 80 (`JEPqrqNqkHw`), 66 (`cOTf_YEmSOU`), 44
+(`dQw4w9WgXcQ`).
+
+Channel reach: 153 channels appear in exactly one seed, 22 in two, 22 in three, none in all
+four.
+
+Co-recommendation shape: 7,859 distinct undirected pairs, of which 7,070 share exactly one
+seed, 558 share two, and 231 share three.
+
+Heaviest edges, for spot-checking: Numberphile in `JEPqrqNqkHw` (23 credits, ≈ 4.724),
+Numberphile in `1cvKGqgOx_8` (20, ≈ 4.669), Numberphile in `cOTf_YEmSOU` (18, ≈ 3.945),
+Classic 80s Mix in `dQw4w9WgXcQ` (7, ≈ 1.559).
+
+Three multi-channel recommendations exist and are recognisable as channel farms: a
+nine-channel cluster ("No Fluff …"), a three-channel music cluster, and a four-channel
+shorts cluster. Two collaborator-only channels — Dr. Becky and Philosophical Instrumentals
+— are legitimate rather than network padding and must stay visible.
+
+## Conventions
+
+TypeScript settings match the repository's existing ones, taken from `extension/`: ES2022
+target, ESM, `strict: true`, `noUncheckedIndexedAccess: true`, npm with a committed
+`package-lock.json`. `tsconfig.json` extends SvelteKit's generated base, which sets
+`target: "esnext"` and omits `noUncheckedIndexedAccess` — both are overridden explicitly.
+
+Server-only code lives under `src/lib/server/` so SvelteKit refuses to bundle it into the
+client. `better-sqlite3` is a native module and must compile against the local Node.
+
+Environment as verified 2026-07-29: Node 25.8.2, npm 11.11.1.
 
 ## Out of scope
-
-Not built in this specification:
 
 - Any write to the database, including triggering collection
 - Any disk write other than the avatar cache
 - Charts and charting dependencies
 - Access to `data/raw/` payloads
-- The channel-to-channel graph mode
-- Views other than the channel graph
+- Views other than the three above
 - Production build or deployment
-- Normalization of display-text columns — deferred until a view requires it
+- Normalization of display-text columns (`BL-013`)
+- The per-seed ranked mode — dropped 2026-07-29, removal tracked as `BL-006`

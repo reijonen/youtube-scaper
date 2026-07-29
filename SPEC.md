@@ -1,4 +1,8 @@
-# YouTube Scraper — Specification v3
+# YouTube Scraper — Specification
+
+Formerly `SPEC-V3.md`; code docstrings still refer to this document as "SPEC-V3", and
+sections it names about the wire protocol now live in [PROTOCOL.md](PROTOCOL.md).
+See `BL-017`.
 
 This document contains only decisions that have been made and verified. Sections are
 added as decisions are settled. Anything absent is still undecided.
@@ -132,8 +136,30 @@ between observations, which is accepted.
 
 ## Measured payload structure
 
-Verified against three captures taken on cookie-less runtime profiles: an ordinary video,
-a finished live stream, and a premiere. Stored in `gates/captures/`.
+Verified against four captures taken on cookie-less runtime profiles, stored in
+`tests/captures/`. Every field path in this section comes from those files. **Do not guess
+at YouTube's payload structure** — if a field you want is not in a capture, say so rather
+than inventing a path.
+
+| Fixture | videoId | kind | comment state |
+|---|---|---|---|
+| `gate-c_video-plain.json` | `KidSMk5sy9E` | `video` | `collected` |
+| `gate-c_video-1.json` | `CK1XU0BySDY` | `past_live` | `collected` |
+| `gate-c_video-livestream.json` | `vW372tfHf7U` | `live` | `live_chat_instead` |
+| `gate-c_video-premiere.json` | `CbwErrmcFWs` | `upcoming` | `none_present` |
+
+**Only `gate-c_video-plain.json` has trustworthy counts.** The other three were taken with
+an earlier probe that held a reference to `ytInitialData` while YouTube mutated it, so
+their `initialData` is the accumulated end state rather than the initial payload. Assert
+exact counts on the plain capture only — 20 recommendations from the initial payload, 60
+more across the continuations, 80 after deduplication, 31 comments. For the other three,
+assert video kind, comment state, that parsing raises nothing, and that every
+recommendation carries a non-empty video ID, title, and channel ID. Do not assert their
+totals.
+
+The comments header differs across fixtures and all three forms must parse: `CK1XU0BySDY`
+reports `["571", " Comments"]`, `KidSMk5sy9E` reports only `["Comments"]` with no number,
+and `CbwErrmcFWs` reports `["0", " Comments"]`.
 
 ### Recommendations
 
@@ -603,25 +629,12 @@ connections over a run. It must also tolerate a second bridge connecting while a
 one is still draining — for example after a service-worker restart — by tagging each
 bridge connection with a generation and ignoring messages from superseded generations.
 
-## Message framing
+## Wire protocol
 
-Chrome native messaging frames a message as a 32-bit length in **native byte order**,
-followed by UTF-8 JSON. Size limits are asymmetric: a message from the host to the
-extension may be at most 1 MB; a message from the extension to the host may be up to
-64 MiB. Captured payloads flow in the roomy direction; anything the controller sends must
-respect the 1 MB ceiling.
-
-The controller Unix socket uses length-prefixed framing, not newline-delimited JSON.
-
-## Connection topology
-
-```
-one persistent extension ↔ native-host connection
-one persistent native-host ↔ controller Unix-socket connection
-```
-
-A new native host or socket is never opened per message. Reconnection uses bounded
-exponential backoff.
+Connection topology, framing (including why the two hops use different byte orders),
+message types, protocol invariants, and error codes are specified in
+[PROTOCOL.md](PROTOCOL.md). Three separately-built components have to agree on it exactly,
+so it lives in its own document.
 
 ## Service-worker lifetime
 
@@ -697,77 +710,6 @@ never be attributed to the current one.
 The collector script's first action is a request/response handshake that returns its
 assignment — video ID, navigation epoch, and collection configuration. It never infers
 its assignment from the URL alone.
-
-## Protocol invariants
-
-- Every message carries a protocol version and the controller-issued run identifier.
-- The first message on a new connection is a handshake. The extension announces its
-  protocol version and whether this is a fresh start or a service-worker restart; the
-  controller replies with the authoritative run identifier. The extension never invents a
-  run identifier. A protocol-version mismatch aborts the run with a clear error rather
-  than degrading.
-- At most one unacknowledged batch is in flight per video at any time.
-- Data is never acknowledged before its SQLite transaction commits. The sequence is:
-  collector sends batch → controller opens a transaction → controller writes the payload
-  and a received-batch record → commit succeeds → controller sends the acknowledgement →
-  collector continues.
-- Every batch carries a unique identifier used for both correlation and idempotent
-  storage.
-- Failure to commit produces an explicit negative acknowledgement carrying whether the
-  failure is retryable. A timeout is never the only signal that something went wrong.
-- The collector keeps an unacknowledged batch in memory and retries it after
-  reconnecting. Captured payloads are never silently discarded.
-- Video completion must be acknowledged before the run advances past that video.
-- On native-messaging disconnect: scrolling stops, the unacknowledged batch is retained,
-  reconnection uses bounded exponential backoff, and collection resumes only after
-  reconnecting.
-- If the controller is unreachable, the bridge reports a structured
-  controller-unavailable error and the extension pauses.
-
-## Messages
-
-One video is collected per browser session, so the protocol carries no queue, no batch of
-URLs, and no index. The controller hands over exactly one video in the handshake reply.
-
-Every message carries `type` and `protocolVersion`.
-
-**Extension → controller**
-
-| Type | Fields | Notes |
-|---|---|---|
-| `hello` | `restart` | First message on a connection. No `runId`; the extension does not have one yet. `restart` distinguishes a fresh service worker from a restarted one. |
-| `payload` | `runId`, `videoId`, `navEpoch`, `batchId`, `source`, `endpoint`, `capturedAt`, `body` | One captured payload per message. `source` is `initial` or `network`. |
-| `video_done` | `runId`, `videoId`, `navEpoch`, `reason` | |
-| `video_failed` | `runId`, `videoId`, `navEpoch`, `errorCode`, `message` | |
-| `ping` | `runId` | Heartbeat. |
-
-**Controller → extension**
-
-| Type | Fields | Notes |
-|---|---|---|
-| `hello_ack` | `runId`, `videoId`, `videoUrl`, `config` | Assigns the single video for this session and issues the authoritative run identifier. |
-| `payload_ack` | `batchId` | Sent only after the transaction commits. |
-| `payload_nack` | `batchId`, `retryable` | |
-| `video_done_ack` | `videoId` | |
-| `video_failed_ack` | `videoId` | |
-| `pong` | | |
-| `stop` | | |
-
-`body` is sent as a nested JSON object, never as an encoded string, so payloads are not
-inflated by escaping. One captured payload per message; payloads are never split across
-messages. A payload whose encoded message would exceed 32 MiB is not sent; it produces a
-structured failure instead. This sits well inside the 64 MiB extension-to-host ceiling,
-and no controller-to-extension message approaches the 1 MB ceiling in the other
-direction.
-
-### Error codes
-
-`PAGE_READY_TIMEOUT`, `CONSENT_WALL`, `VIDEO_UNAVAILABLE`, `AGE_RESTRICTED`,
-`LOGIN_REQUIRED`, `SHORTS_EXCLUDED`, `UNEXPECTED_NAVIGATION`, `SCHEMA_UNRECOGNISED`,
-`CHAIN_STALLED`, `CIRCUIT_BREAKER`, `PAYLOAD_TOO_LARGE`, `CONTROLLER_UNAVAILABLE`.
-
-Every code is recorded against the video. A video that failed is never recorded as having
-legitimately yielded nothing.
 
 ## Storage semantics
 
